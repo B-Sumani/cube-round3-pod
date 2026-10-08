@@ -1,44 +1,174 @@
-# agents/returns/  ·  Returns Manager
+# Returns Manager
 
-**Owner:** Member 4 (Returns Manager)  (set `owner` in `agent.json` and the handle in `.github/CODEOWNERS`)
+## Purpose
 
-> **This folder currently contains an organiser stub** that replays the synthetic Round 2 CSV. It is *not* an agent. Replace it, then replace this README with one that describes what you actually built, how to run it, and its limits.
+The Returns Manager evaluates a returned unit and produces a
+Round 3 contract-compliant recommendation with traceable evidence.
 
-| | |
-|---|---|
-| **Reads (inputs)** | Photos of the returned parcel and the expected parts list |
-| **Reads (previous evidence)** | Pack (what was sent), Receiving |
-| **Produces** | identity, completeness, condition, disposition |
-| **Recommended `check_key`s** | `identity_match, completeness, condition` |
-| **`decision.outcome` values** | `restock, refurbish, liquidate, dispose, pending_review` |
+## Processing pipeline
 
-Grade condition on **Amazon's published condition scale**: do not invent your own (the Round 2 data leaves `amazon_condition` empty on purpose). The shipped stub does not grade condition (`payload.condition_graded: false`) and copies the operator's disposition: replace it. Returns on FBA-routed units are an open question (finding F-11).
+The adapted Returns business logic follows:
 
-## Where your code goes
+Vision
+→ Identity
+→ Completeness
+→ Condition
+→ Disposition
 
-```text
-agents/returns/
-├── app.py          ← expose  handle(agent_input: dict) -> dict  (an Agent Output). Keep `app = make_app(...)` to serve over HTTP.
-├── agent.json      ← stage · agent_id · owner · mode (inproc | http) · url · an honest `implementation` description
-├── PROVENANCE.md   ← your Round 2 repo URL + commit this came from (create it)
-├── README.md       ← this file, rewritten
-└── …               ← your Round 2 code, prompts, rules, fixtures
-```
+## Round 3 agent boundary
 
-## Integrating, in order
+The agent accepts the shared Round 3 Agent Input:
 
-1. Read [`INTEGRATION-GUIDE.md`](../../INTEGRATION-GUIDE.md) and [`EVIDENCE-CONTRACT.md`](../../EVIDENCE-CONTRACT.md); open [`examples/end-to-end/`](../../examples/) for a real Agent Output.
-2. In `handle()`: read `request["subject"]`, `request["inputs"]` (your captures) and `request["previous_evidence"]`; run your agent (**one batched model call per unit**); build the record with `shared.utils.records.build_record()` and wrap it with `build_output()`.
-3. **Fail open.** On a model error return `pending_output(...)`, not an exception. Never invent evidence: if you did not see it, say UNCERTAIN with an `uncertain_reason`.
-4. **Refuse other tenants.** Raise `LookupError` (HTTP 404) for a subject that is not under `subject.org_id`.
-5. Make it idempotent: the same `request_id` must yield the same `record_id`. Use the **latest override** of previous evidence (`context.overrides`).
-6. Run `pytest tests/integration/test_agent_contracts.py`, first on the stub (it passes), then on yours, **with your own fixtures**.
-7. Run the whole system: `make run` and `make test`.
+- schema_version
+- request_id
+- workflow_id
+- stage
+- subject
+- inputs
+- previous_evidence
+- context
 
-## Run on its own
+The agent returns the shared Round 3 Agent Output containing:
 
-```sh
-.venv/bin/uvicorn agents.returns.app:app --port 8104
-curl localhost:8104/health
-```
-Then set `"mode": "http"` in `agent.json` if you want the orchestrator to call it over HTTP.
+- schema_version
+- workflow_id
+- stage
+- agent_id
+- status
+- verdict
+- confidence
+- timestamp
+- model
+- error
+- evidence
+
+## Input layout
+
+Returns inputs are read from:
+
+data/input/<subject_id>/returns/
+
+Expected inputs include:
+
+- return_case.json
+- one or more returned-item images
+
+The case document provides structured information such as:
+
+- org_id
+- subject_id
+- order_id
+- ordered SKU
+- ordered ASIN
+- parts list
+- missing parts
+- captured_at
+- operator information
+- supplied Amazon condition information when available
+
+## Checks
+
+The Returns Manager produces these Round 3 checks:
+
+- identity_match
+- completeness
+- condition
+
+Each check may be:
+
+- PASS
+- FAIL
+- UNCERTAIN
+
+UNCERTAIN is preserved as a first-class outcome when the evidence is insufficient.
+
+## Disposition
+
+The recommended disposition is derived from the Returns evidence and
+business checks.
+
+Possible dispositions include:
+
+- restock
+- refurbish
+- liquidate
+- dispose
+- pending_review
+
+`operator_disposition` is retained as operator/reference information.
+It is not used as the AI recommendation.
+
+## Previous evidence
+
+The agent accepts accumulated `previous_evidence[]` from the orchestrator.
+
+Applicable upstream evidence may include:
+
+- Receiving evidence
+- Prep evidence
+- Pack evidence
+
+Upstream record IDs are preserved in the Returns Evidence Record as
+`upstream_refs`.
+
+The Returns agent does not call other agents directly.
+
+## Missing input behavior
+
+Required Returns inputs must not be silently ignored.
+
+When a required document or image is missing, the agent returns an
+explicit pending/error response rather than producing a successful
+decision.
+
+## Tenant isolation
+
+The agent validates `org_id` and `subject_id` so a Returns case from
+another organisation or subject cannot be processed for the current
+request.
+
+## HTTP interface
+
+When running in HTTP mode:
+
+GET /health
+
+POST /run
+
+Example server:
+
+python -m uvicorn agents.returns.app:app --host 127.0.0.1 --port 8104
+
+## Round 2 adaptation
+
+The business logic was adapted from the Round 2 Returns repository.
+
+The Round 3 implementation adds:
+
+- shared Round 3 contract
+- tenant validation
+- safe input resolution
+- explicit missing-input handling
+- UNCERTAIN preservation
+- previous_evidence handling
+- upstream references
+- operator-disposition separation
+- Round 3 Evidence Record
+- HTTP health/run interface
+
+See `PROVENANCE.md` for the source repository and commit.
+
+## Tests
+
+Returns tests cover:
+
+- contract validation
+- identity
+- completeness
+- condition
+- UNCERTAIN identity
+- missing required input
+- wrong tenant
+- previous evidence
+- operator disposition
+- idempotency
