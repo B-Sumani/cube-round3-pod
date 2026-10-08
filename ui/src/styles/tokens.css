@@ -1,0 +1,20 @@
+:root {
+  /* Surface and Band Colors */
+  --cream: #FFF6DE;
+  --teal: #8ED5CF;
+  --peach: #FFCDB3;
+  --mustard: #F8C94D;
+  --charcoal: #3A3A3A;
+  --ink: #1F1B16;
+  --muted: #5E5A52;
+  --card: #FFFDF6;
+
+  /* Charcoal Band Accent / Text */
+  --charcoal-text: #FFF6DE;
+  --charcoal-muted: #D1CBBF;
+
+  /* Functional Verdict Colors (always pair with icon + label) */
+  --verdict-pass: #2E9E6B;
+  --verdict-fail: #D64545;
+  --verdict-uncertain: #E39A0B;
+}
