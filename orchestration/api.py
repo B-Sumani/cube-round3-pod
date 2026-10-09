@@ -13,10 +13,13 @@ No authentication is included: X-Org-Id is a scoping key, not a credential. Add 
 """
 from __future__ import annotations
 
+import contextlib
+import json
 import os
+from pathlib import Path
 import re
 
-from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi import APIRouter, FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -26,7 +29,46 @@ from .clients import HttpClient, client_for, load_manifest
 from .orchestrator import apply_override, bundle, default_flow_path, flow_stages, load_flow, resume, run_workflow
 from .store import EvidenceConflict, FileStore, TenantViolation, WorkflowBusy
 
-app = FastAPI(title="CUBE Round 3 orchestrator")
+# Ensure in-process agents are used by default (e.g. for Vercel and local dev)
+os.environ.setdefault("ORCH_MODE", "inproc")
+
+FLOW = os.environ.get("ORCH_FLOW") or default_flow_path()
+STORE = FileStore()
+ORG_ID = re.compile(r"^[A-Za-z0-9_]+$")
+SUBJECT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
+def seed_sample_workflows_if_empty(store: FileStore | None = None, flow_path: str | Path | None = None) -> None:
+    """Seed sample workflows into the store if it contains no workflows yet."""
+    target_store = store or STORE
+    if not hasattr(target_store, "root"):
+        return
+    workflows_dir = target_store.root / "workflows"
+    if not workflows_dir.exists() or not any(workflows_dir.glob("*.json")):
+        cases_file = Path(__file__).resolve().parents[1] / "data" / "sample" / "cases.json"
+        if cases_file.exists():
+            try:
+                cases = json.loads(cases_file.read_text(encoding="utf-8"))
+                flow = load_flow(flow_path or FLOW)
+                for case in cases:
+                    run_workflow(case, flow, target_store)
+            except Exception:
+                pass
+
+
+@contextlib.asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Seed on startup if store is empty (e.g. fresh Vercel /tmp instance)
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        seed_sample_workflows_if_empty(STORE, FLOW)
+    yield
+
+
+# Immediate seed on module load if running under Vercel serverless environment
+if os.environ.get("VERCEL") and not os.environ.get("PYTEST_CURRENT_TEST"):
+    seed_sample_workflows_if_empty(STORE, FLOW)
+
+app = FastAPI(title="CUBE Round 3 orchestrator", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -40,13 +82,12 @@ app.add_middleware(
 def _busy(request: Request, exc: WorkflowBusy) -> JSONResponse:
     """Another caller is advancing this workflow for longer than ORCH_LOCK_TIMEOUT_S (D-115). Nothing changed."""
     return JSONResponse(status_code=409, content={"detail": f"{exc}; nothing was changed, retry later"})
-FLOW = os.environ.get("ORCH_FLOW") or default_flow_path()
-STORE = FileStore()
-ORG_ID = re.compile(r"^[A-Za-z0-9_]+$")
-SUBJECT_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 
 
-@app.get("/health")
+router = APIRouter()
+
+
+@router.get("/health")
 def health() -> dict:
     agents = {}
     for stage in flow_stages(load_flow(FLOW)):
@@ -59,7 +100,7 @@ def health() -> dict:
     return {"status": "ok" if ok else "degraded", "flow": load_flow(FLOW)["flow_id"], "agents": agents}
 
 
-@app.post("/workflows")
+@router.post("/workflows")
 def create(body: dict) -> dict:
     org, subject = body.get("org_id"), body.get("subject_id") or body.get("unit_id")
     if not org or not subject:
@@ -90,24 +131,24 @@ def _get(workflow_id: str, org: str) -> dict:
     return wf
 
 
-@app.get("/workflows/{workflow_id}")
+@router.get("/workflows/{workflow_id}")
 def get(workflow_id: str, x_org_id: str | None = Header(None), org_id: str | None = Query(None)) -> dict:
     return _get(workflow_id, _org(x_org_id, org_id))
 
 
-@app.get("/workflows/{workflow_id}/evidence")
+@router.get("/workflows/{workflow_id}/evidence")
 def evidence(workflow_id: str, x_org_id: str | None = Header(None), org_id: str | None = Query(None)) -> dict:
     return bundle(_get(workflow_id, _org(x_org_id, org_id)), STORE)
 
 
-@app.post("/workflows/{workflow_id}/resume")
+@router.post("/workflows/{workflow_id}/resume")
 def resume_workflow(workflow_id: str, x_org_id: str | None = Header(None), org_id: str | None = Query(None)) -> dict:
     org = _org(x_org_id, org_id)
     _get(workflow_id, org)
     return resume(workflow_id, load_flow(FLOW), STORE, org_id=org)
 
 
-@app.post("/workflows/{workflow_id}/overrides")
+@router.post("/workflows/{workflow_id}/overrides")
 def override(workflow_id: str, body: dict, x_org_id: str | None = Header(None), org_id: str | None = Query(None)) -> dict:
     org = _org(x_org_id, org_id)
     _get(workflow_id, org)
@@ -117,3 +158,8 @@ def override(workflow_id: str, body: dict, x_org_id: str | None = Header(None), 
                               org_id=org)
     except (ValueError, EvidenceConflict) as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+# Include routes at root and with /api prefix
+app.include_router(router)
+app.include_router(router, prefix="/api")

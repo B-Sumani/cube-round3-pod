@@ -37,8 +37,23 @@ function extractOrgFromWorkflowId(workflowId) {
   return null
 }
 
+// Same-origin "/api" in production; localhost:8100/api fallback in dev; VITE_API_URL override allowed
+const RAW_API_BASE =
+  import.meta.env.VITE_API_URL ||
+  (import.meta.env.DEV ? 'http://127.0.0.1:8100/api' : '/api')
+
+const API_BASE = RAW_API_BASE.replace(/\/+$/, '')
+
+function buildUrl(path) {
+  const cleanPath = path.startsWith('/') ? path : `/${path}`
+  if (API_BASE.endsWith('/api') && cleanPath.startsWith('/api/')) {
+    return `${API_BASE.slice(0, -4)}${cleanPath}`
+  }
+  return `${API_BASE}${cleanPath}`
+}
+
 async function request(path, options = {}) {
-  const url = `/api${path}`
+  const url = buildUrl(path)
   const org = options.orgId || options.headers?.['X-Org-Id'] || getActiveOrg()
   const headers = {
     'Content-Type': 'application/json',
