@@ -1,19 +1,10 @@
 {
   "stage": "prep",
-feature/prep-r3
   "agent_id": "prep-manager@1.0.0",
-  "module": "agents.prep.app",
-  "mode": "inproc",
-  "url": "http://localhost:8102",
-  "implementation": "prep-manager"
-}
-
-  "agent_id": "prep-stub@0",
-  "owner": "@organiser",
+  "owner": "@B-Sumani",
   "mode": "inproc",
   "url": "http://localhost:8102",
   "module": "agents.prep.app",
-  "implementation": "organiser-stub",
-  "notes": "Organiser stub replaying Round 2 sample CSV. Prep is NOT integrated yet (see ARCHITECTURE.md). It must never look like a real agent."
+  "implementation": "real",
+  "notes": "Round 3 Prep Manager agent. Evaluates FBA prep compliance (polybag, suffocation warning, FNSKU, expiry, handling marks)."
 }
-main

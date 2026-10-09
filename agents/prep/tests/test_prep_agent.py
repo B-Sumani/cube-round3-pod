@@ -1,3 +1,4 @@
+import uuid
 import pytest
 from unittest.mock import patch
 from fastapi.testclient import TestClient
@@ -9,7 +10,7 @@ client = TestClient(app)
 def base_request():
     return {
         "schema_version": "1.0",
-        "request_id": "test_req_001",
+        "request_id": f"test_req_{uuid.uuid4().hex[:8]}",
         "workflow_id": "wf_12345",
         "stage": "prep",
         "subject": {
