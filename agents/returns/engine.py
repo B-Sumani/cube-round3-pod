@@ -1,3 +1,4 @@
+
 """Round 3 Returns Manager business logic.
 
 This module adapts the useful Round 2 Returns Manager pipeline:
@@ -65,19 +66,20 @@ def _adapt_identity_result(result: CheckResult) -> CheckResult:
     return result
 
 
-def analyze_return(case: ReturnCase) -> dict:
+def analyze_return(
+    case: ReturnCase,
+    vision_model=None,
+) -> dict:
     """Run the Returns business logic for one returned unit.
 
+    Args:
+        case: Return case containing structured data and image references.
+        vision_model: Optional compatible vision model. If omitted,
+            the deterministic fixture model is used for testing/demo.
+
     Returns:
-        {
-            "case": updated_return_case,
-            "checks": [
-                identity_match,
-                completeness,
-                condition,
-            ],
-            "recommended_disposition": "...",
-        }
+        A dictionary containing the updated case, check results,
+        and recommended disposition.
     """
 
     # Round 3 must not silently ignore missing required evidence.
@@ -90,9 +92,15 @@ def analyze_return(case: ReturnCase) -> dict:
     # 1. Vision
     # ---------------------------------------------------------
 
+    model = (
+        vision_model
+        if vision_model is not None
+        else FixtureVisionModel()
+    )
+
     observations = analyze_case_images(
         working_case,
-        model=FixtureVisionModel(),
+        model=model,
     )
 
     if not observations:
@@ -107,7 +115,8 @@ def analyze_return(case: ReturnCase) -> dict:
             working_case,
             aggregated,
         )
-            # The Round 2 vision layer uses "match"/"uncertain",
+
+    # The Round 2 vision layer uses "match"/"uncertain",
     # while the Round 2 identity checker expects
     # "yes"/"no"/"uncertain".
     if working_case.identity_match == "match":
