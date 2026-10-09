@@ -14,10 +14,15 @@ from shared.utils.records import (
     build_record,
     check,
     pending_output,
+    utcnow,
 )
 from shared.utils.server import make_app
 
-from .engine import MissingRequiredInputError, analyze_return
+from .engine import MissingRequiredInputError, analyze_return, _adapt_identity_result
+from .r2_logic.completeness import assess_completeness
+from .r2_logic.condition import assess_condition
+from .r2_logic.disposition import recommend_disposition
+from .r2_logic.identity import assess_identity
 from .r2_logic.models import ReturnCase
 
 
@@ -105,6 +110,29 @@ def load_return_case(request: dict) -> tuple[ReturnCase, list[dict]]:
     ]
 
     if not documents:
+        if sample_data.has("returns", subject_id, org_id):
+            r = sample_data.row("returns", subject_id, org_id)
+            parts_list = [p for p in r.get("parts_list", "").split(";") if p]
+            parts_missing = [p for p in r.get("parts_missing", "").split(";") if p]
+            case = ReturnCase(
+                record_id=r.get("record_id") or f"RTN-{subject_id}",
+                unit_id=subject_id,
+                org_id=org_id,
+                photo_refs=[],
+                operator_id=r.get("operator_id"),
+                captured_at=r.get("captured_at") or utcnow(),
+                order_id=r.get("order_id"),
+                ordered_sku=r.get("ordered_sku"),
+                ordered_asin=r.get("ordered_asin"),
+                identity_match=r.get("identity_match"),
+                parts_list=parts_list,
+                parts_missing=parts_missing,
+                observed_state=r.get("observed_state"),
+                amazon_condition=r.get("amazon_condition") or None,
+                operator_disposition=r.get("operator_disposition"),
+            )
+            return case, []
+
         raise MissingRequiredInputError(
             "Required Returns case document is missing."
         )
@@ -276,7 +304,26 @@ def handle(request: dict) -> dict:
     evidence_refs = [*image_refs, *upstream_refs]
 
     try:
-        result = analyze_return(case)
+        if image_inputs:
+            result = analyze_return(case)
+            working_case = result["case"]
+            results = result["checks"]
+            rec_disp = result["recommended_disposition"]
+        else:
+            # Replay mode from sample/PO records: evaluate Round 2 logic without requiring physical images
+            working_case = case
+            identity_result = _adapt_identity_result(assess_identity(working_case))
+            completeness_result = assess_completeness(working_case)
+            if working_case.amazon_condition:
+                condition_result = assess_condition(working_case)
+                rec_disp = recommend_disposition(
+                    identity_result, completeness_result, condition_result
+                )
+                results = [identity_result, completeness_result, condition_result]
+            else:
+                # Per contract: a check that does not apply is omitted, not marked PASS.
+                rec_disp = working_case.operator_disposition or "pending_review"
+                results = [identity_result, completeness_result]
     except MissingRequiredInputError as exc:
         return pending_output(
             request,
@@ -294,38 +341,39 @@ def handle(request: dict) -> dict:
             agent_id=AGENT_ID,
         )
 
-    working_case = result["case"]
-    results = result["checks"]
-
-    round3_checks = [
-        to_round3_check(
-            results[0],
-            expected=working_case.ordered_sku,
-            observed=working_case.identity_match,
-            evidence_refs=evidence_refs,
-        ),
-        to_round3_check(
-            results[1],
-            expected=working_case.parts_list,
-            observed={"missing": working_case.parts_missing},
-            evidence_refs=evidence_refs,
-        ),
-        to_round3_check(
-            results[2],
-            expected=working_case.amazon_condition,
-            observed=working_case.observed_state,
-            evidence_refs=evidence_refs,
-        ),
-    ]
+    round3_checks = []
+    for chk in results:
+        if chk.check_key == "identity_match":
+            round3_checks.append(to_round3_check(
+                chk,
+                expected=working_case.ordered_sku,
+                observed=working_case.identity_match,
+                evidence_refs=evidence_refs,
+            ))
+        elif chk.check_key == "completeness":
+            round3_checks.append(to_round3_check(
+                chk,
+                expected=working_case.parts_list,
+                observed={"missing": working_case.parts_missing},
+                evidence_refs=evidence_refs,
+            ))
+        elif chk.check_key == "condition":
+            round3_checks.append(to_round3_check(
+                chk,
+                expected=working_case.amazon_condition,
+                observed=working_case.observed_state,
+                evidence_refs=evidence_refs,
+            ))
 
     context = request.get("context") or {}
 
     payload = {
         "observed_state": working_case.observed_state,
         "amazon_condition": working_case.amazon_condition,
+        "condition_graded": bool(working_case.amazon_condition),
         "operator_disposition": working_case.operator_disposition,
         "operator_disposition_is_reference": True,
-        "recommended_disposition": result["recommended_disposition"],
+        "recommended_disposition": rec_disp,
         "upstream_override_context": context.get("overrides") or [],
     }
 
@@ -341,7 +389,7 @@ def handle(request: dict) -> dict:
             "asin": working_case.ordered_asin,
         },
         checks=round3_checks,
-        outcome=result["recommended_disposition"],
+        outcome=rec_disp,
         confidence=min(
             [
                 item["confidence"]

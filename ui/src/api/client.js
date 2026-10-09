@@ -11,10 +11,38 @@
  * - POST /workflows/{id}/overrides orchestration/api.py:75-82
  */
 
+function getActiveOrg() {
+  if (typeof window === 'undefined') return 'org_demo_alpha'
+  try {
+    for (let i = 0; i < sessionStorage.length; i++) {
+      const key = sessionStorage.key(i)
+      if (key && key.endsWith('_session_org')) {
+        const val = sessionStorage.getItem(key)
+        if (val) return val
+      }
+    }
+  } catch (e) {
+    // ignore
+  }
+  return 'org_demo_alpha'
+}
+
+function extractOrgFromWorkflowId(workflowId) {
+  if (typeof workflowId === 'string' && workflowId.startsWith('WF-')) {
+    const parts = workflowId.split('-')
+    if (parts.length >= 3) {
+      return parts[1]
+    }
+  }
+  return null
+}
+
 async function request(path, options = {}) {
   const url = `/api${path}`
+  const org = options.orgId || options.headers?.['X-Org-Id'] || getActiveOrg()
   const headers = {
     'Content-Type': 'application/json',
+    'X-Org-Id': org,
     ...(options.headers || {}),
   }
 
@@ -46,6 +74,11 @@ async function request(path, options = {}) {
   return data
 }
 
+/** Check health of orchestrator and stage agents */
+export async function getHealth() {
+  return request('/health')
+}
+
 
 /** Run or advance a workflow case (orchestration/api.py:42-49) */
 export async function createWorkflow({ org_id, unit_id, route, returned }) {
@@ -63,25 +96,30 @@ export async function createWorkflow({ org_id, unit_id, route, returned }) {
 }
 
 /** Fetch workflow state by ID (orchestration/api.py:59-62) */
-export async function getWorkflow(workflowId) {
-  return request(`/workflows/${encodeURIComponent(workflowId)}`)
+export async function getWorkflow(workflowId, orgId) {
+  const org = orgId || extractOrgFromWorkflowId(workflowId)
+  return request(`/workflows/${encodeURIComponent(workflowId)}`, { orgId: org })
 }
 
 /** Fetch workflow state and all referenced evidence records (orchestration/api.py:64-66) */
-export async function getWorkflowEvidence(workflowId) {
-  return request(`/workflows/${encodeURIComponent(workflowId)}/evidence`)
+export async function getWorkflowEvidence(workflowId, orgId) {
+  const org = orgId || extractOrgFromWorkflowId(workflowId)
+  return request(`/workflows/${encodeURIComponent(workflowId)}/evidence`, { orgId: org })
 }
 
 /** Resume workflow after halt, override, or failure (orchestration/api.py:69-72) */
-export async function resumeWorkflow(workflowId) {
+export async function resumeWorkflow(workflowId, orgId) {
+  const org = orgId || extractOrgFromWorkflowId(workflowId)
   return request(`/workflows/${encodeURIComponent(workflowId)}/resume`, {
     method: 'POST',
     body: JSON.stringify({}),
+    orgId: org,
   })
 }
 
 /** Apply an override to an evidence record's decision (orchestration/api.py:75-82) */
-export async function applyOverride(workflowId, { record_id, new_verdict, actor, reason, new_outcome }) {
+export async function applyOverride(workflowId, { record_id, new_verdict, actor, reason, new_outcome }, orgId) {
+  const org = orgId || extractOrgFromWorkflowId(workflowId)
   const body = {
     record_id,
     new_verdict,
@@ -94,5 +132,6 @@ export async function applyOverride(workflowId, { record_id, new_verdict, actor,
   return request(`/workflows/${encodeURIComponent(workflowId)}/overrides`, {
     method: 'POST',
     body: JSON.stringify(body),
+    orgId: org,
   })
 }

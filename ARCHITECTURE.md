@@ -116,9 +116,9 @@ Every failure is **recorded and never becomes success**: a degraded evidence rec
 
 ---
 
-## Our Pod's architecture
+### Our Pod's architecture
 
-> Status (2026-10-09): **Receiving is our integrated Round 2 agent. Prep, Pack, Returns and Recovery are still organiser stubs** (`implementation: organiser-stub` in each `agent.json`), until each owner brings their Round 2 agent in. Pod type: `standard` (default; confirm with the organisers).
+> Status (2026-10-10): **Receiving, Pack, Returns and Recovery are integrated Round 2 agents. Prep is maintained strictly as an organiser stub** (`implementation: "organiser-stub"` in `agents/prep/agent.json`). Pod type: `standard`. Pod ID: `pod-06`.
 
 ### 1. Diagram
 
@@ -136,10 +136,10 @@ Every failure is **recorded and never becomes success**: a degraded evidence rec
  └────────────────────────────────────────────────────────────────────────────────┘
         │            │ fba          │ mfn          │ returned      │
         ▼            ▼              ▼              ▼               ▼
-  Receiving ──▶   Prep  ─┐      Pack  ─┐       Returns ─┐      Recovery
-  (Round 2       (stub)  │      (stub) │       (stub)   │      (stub; reads every
-   rules +               └──────────────┴────────────────┴────▶ prior record +
-   vision)                                                       fee report)
+   Receiving ──▶   Prep  ─┐      Pack  ─┐       Returns ─┐      Recovery
+   (Round 2       (stub)  │      (Round 2│       (Round 2│      (Round 2; reads every
+    rules +               └──────────────┴───────────────┴────▶ prior record +
+    vision)                      rules)         rules)          fee report)
         │
         ▼
  FileStore out/workflows/*.json, out/evidence/*.json   (MemoryStore in tests)
@@ -147,27 +147,52 @@ Every failure is **recorded and never becomes success**: a degraded evidence rec
 
 ### 2. What each agent really is
 
-| Stage | Implementation | Model calls | Notes |
-|---|---|---|---|
-| Receiving | **Round 2 agent** (`agents/receiving/`, [PROVENANCE](agents/receiving/PROVENANCE.md)): Round 2 `decision_engine.py` verbatim plus Round 2 `VisionService` | 0 (recorded mode) / 1 per unit (vision mode) | Rules decide every verdict. Mode is declared in `model` and `payload.perception`. |
-| Prep | organiser stub (CSV replay) | 0 | owner to integrate |
-| Pack | organiser stub | 0 | owner to integrate |
-| Returns | organiser stub | 0 | owner to integrate |
-| Recovery | organiser stub | 0 | owner to integrate; already keeps F-10 shortfalls SILENT |
+| Stage | Implementation | Owner | Model calls | Notes |
+|---|---|---|---|---|
+| **Receiving** | **Round 2 agent** (`agents/receiving/`, [PROVENANCE](agents/receiving/PROVENANCE.md)): Round 2 `decision_engine.py` verbatim plus Round 2 `VisionService` | @Harish2300032959 | 0 (recorded mode) / 1 per unit (vision mode) | Rules decide every verdict. Mode declared in `model` and `payload.perception`. Supplier shortfalls tagged as `shortfall_side = "supplier"` (F-10). |
+| **Prep** | **Organiser stub** (CSV replay) | Organisers / Pending | 0 | Left as stub pending member integration. Clearly marked `[STUB REPLAY]` in checks and detail. Does not fabricate claims. |
+| **Pack** | **Round 2 agent** (`agents/pack/`, [PROVENANCE](agents/pack/PROVENANCE.md)): Round 2 packaging assessment engine | @Vaishali-39 | 0 (rule-based) | Validates SKU barcode, packaging type, hazmat, unsealed liquids. Issues `stop_and_fix` on severe packaging defects. |
+| **Returns** | **Round 2 agent** (`agents/returns/`, [PROVENANCE](agents/returns/PROVENANCE.md)): Round 2 return evaluation engine | @hayth31 | 0 (deterministic) | Evaluates return identity, completeness, condition grading, and disposition. Replays sample inputs cleanly when raw files are omitted. |
+| **Recovery** | **Round 2 agent** (`agents/recovery/`, [PROVENANCE](agents/recovery/PROVENANCE.md)): Round 2 audit & dispute engine | @B-Sumani | 0 (audit rules) | Consumes ALL accumulated prior evidence. Disallow false claims on supplier shortfalls (F-10) or missing Prep evidence (F-07). |
 
-### 3. Orchestrator
+### 3. Orchestration
 
-The starter engine is kept. It is tested and matches D-001…D-004. State is a JSON workflow document per `(org, unit)`, written atomically (`tmp` + `replace`), so a restart resumes from the file. Timeouts: `timeout_s` is enforced for HTTP and, since D-110, for in-process agents too (worker thread; a late answer is discarded). Concurrency: one caller at a time per workflow (thread + OS file lock; a waiter gets 409 after `ORCH_LOCK_TIMEOUT_S`, D-115), and evidence is created atomically (D-116). Retries: `flow.defaults.retries` for `agent_timeout`/`agent_unavailable`; never for `agent_rejected`/`invalid_output`/`tenant_mismatch`. Evidence is immutable: re-writing a `record_id` with different content raises. Overrides are appended workflow entries that reference the superseded record; downstream agents receive them in `context.overrides`. See D-101…D-109.
+The orchestrator (`orchestration/`) is the central control plane and single source of truth for the commerce pipeline:
 
-### 4. Routing and final outcome
+- **State Ownership:** The orchestrator owns workflow state (`WorkflowState`). Individual agents never write state or decide the pipeline outcome; agents only emit an `AgentOutput` containing an immutable `EvidenceRecord`. Workflow state is written atomically (via tempfile and atomic file replacement or memory lock) and survives process restarts (`FileStore`).
+- **The Flow:** Configured via `orchestration/flow.json`. Units are routed according to their attributes:
+  - FBA units route through `receiving → prep → recovery`.
+  - MFN / 3PL units route through `receiving → pack → recovery`.
+  - Returns inspection (`returns`) runs if and only if `returned: true`.
+  - Unrouted units (`route: "unknown"`) skip both prep and pack.
+  - Every stage invocation carries the subject (`org_id`, `subject_id`), discovered stage inputs hashed with SHA-256, **all previous evidence records**, and active human overrides.
+- **Status & Outcome Derivation:** Derived strictly via pure functions in `orchestration/rollup.py`:
+  - **Status Precedence:** `FAILED` (if any stage errored or refused) > `BLOCKED` (if an unoverridden stage is UNCERTAIN with `needs_human` or policy `block`) > `RECOVERY_REQUIRED` (if an upstream failure preceded recovery) > `IN_PROGRESS` (if required stages remain pending) > `COMPLETED`.
+  - **Final Outcome Precedence:** `CLAIM_RECOMMENDED` (recoverable channel fee disputed with contradicting evidence) > `EXCEPTION` (any stage failed/defective, e.g. carton damaged or pack `stop_and_fix`) > `INCOMPLETE` (workflow or required stage incomplete) > `NEEDS_REVIEW` (any stage UNCERTAIN) > `CLEAN` (all required stages PASS).
+  - **Provisionality:** `final_outcome.provisional` is strictly `true` whenever `status != "COMPLETED"`.
+  - **Evidence Backing:** `contributing_records` is guaranteed non-empty for every evaluated workflow.
+- **Failure Handling:**
+  - Strict validation of all agent outputs: schema conformance, correct stage name, workflow ID match, tenant match, content hash verification, and internal consistency.
+  - Failures are **never** treated as success: an agent failure or rejection creates a degraded evidence record (`verdict: "UNCERTAIN"`, status `error`, no fabricated checks), and the workflow ends `FAILED` / `INCOMPLETE`.
+  - Transient errors (`agent_timeout`, `agent_unavailable`) are retried according to `flow.defaults.retries`. Non-transient errors (`agent_rejected`, `tenant_mismatch`, `invalid_output`) are never retried.
+  - `resume` re-runs errored or halted stages under a new request ID (`:r2`), preserving the original failed attempt's evidence record intact in the audit trail.
+- **Tenancy:**
+  - Multi-tenancy is enforced in depth: in agent handlers (raising `AgentRejected` / `LookupError`), in orchestrator output validation (detecting `tenant_mismatch`), and at storage level (`MemoryStore` and `FileStore` strictly enforce `org_id` on reads and writes, raising `TenantViolation`).
+  - The API requires `X-Org-Id` and returns 404 for missing or mismatched tenant records to prevent tenant enumeration.
 
-Routing: `flow.json` (D-000). Receiving always runs, then Prep for FBA or Pack for MFN, then Returns only if returned, then Recovery. Final outcome: `rollup.py` precedence `CLAIM_RECOMMENDED > EXCEPTION > INCOMPLETE > NEEDS_REVIEW > CLEAN`. UNCERTAIN is never turned into PASS. A Receiving UNCERTAIN sets `needs_human`, so the workflow is `BLOCKED` / `NEEDS_REVIEW` until an override is recorded.
+### 4. How to Swap in the Real Prep Agent
 
-### 5. Tenancy
+When the real Round 2 Prep agent is ready to be merged:
+1. Copy the Prep code into `agents/prep/` (or deploy as an HTTP service).
+2. Edit `agents/prep/agent.json`:
+   - Change `"implementation": "organiser-stub"` to `"implementation": "real"`.
+   - Update `"owner"` with the Prep owner's handle.
+   - Set `"mode": "inproc"` (with `handle(request)` defined in `agents/prep/app.py`) or `"mode": "http"` (with endpoint configuration).
+3. Ensure the Prep agent returns valid evidence with checks (`polybag_check`, `barcode_scannable`, `fragile_bubble_wrap`, etc.) and a SHA-256 sealed envelope.
+4. Recovery will automatically consume the real Prep evidence and un-silence inbound defect fee claims when Prep evidence contradicts Amazon charges.
+5. Verify with `pytest tests/integration/test_prep_handling.py` and `pytest tests/e2e/`.
 
-Enforced in three places: (a) every agent looks up its subject scoped by `org_id` and raises `LookupError` → 404 / `AgentRejected` otherwise; (b) the orchestrator rejects any output whose evidence names another org or subject (`tenant_mismatch`); (c) **storage**: every store read and write is org-scoped (`TenantViolation`), and the API requires `X-Org-Id` and returns 404 for another org's workflow (D-106). Tests: `tests/integration/test_store_tenancy.py`, `test_agent_contracts.py::test_other_tenant_gets_nothing`, `test_receiving_agent.py::test_wrong_tenant_is_refused`.
-
-### 6. Failure model (what we break in the demo)
+### 5. Failure model (what we break in the demo)
 
 | Injected | What happens |
 |---|---|
@@ -175,16 +200,17 @@ Enforced in three places: (a) every agent looks up its subject scoped by `org_id
 | Agent unreachable (HTTP mode, nothing listening) | `agent_unavailable` degraded record, then `FAILED`. |
 | Invalid output / wrong tenant in output | Rejected before storage, error recorded, `FAILED`. |
 | UNCERTAIN identity (e.g. UNIT-0029) | `BLOCKED` / `NEEDS_REVIEW`. `apply_override` by a named actor is recorded and the outcome re-derived; the original record is unchanged. |
+| Pack defect (`stop_and_fix`) | `EXCEPTION` outcome with `needs_human: true`. Package held on line until human override. |
 
-### 7. Deployment
+### 6. Deployment
 
-Local only so far: `make run` / `.\pod.ps1 run` (CLI) and `make serve` / `.\pod.ps1 serve` (API on :8100). Any agent can run as its own service with `uvicorn agents.<stage>.app:app` and `mode: http`. No public URL yet.
+- **In-process (single process):** `python -m orchestration.run` (CLI) or `uvicorn orchestration.api:app --port 8100` (API).
+- **HTTP mode:** Run each agent with `uvicorn agents.<stage>.app:app --port <port>` and set `<STAGE>_URL`.
+- **UI:** Single Page Application under `ui/` built with Vite (`npm run build` -> `ui/dist/`), communicating with orchestrator API at `/workflows`, `/workflows/{id}`, `/workflows/{id}/evidence`, etc.
 
-### 8. Known limits
+### 7. Known limits
 
-- Four of five stages are still stubs. End-to-end results reflect stub logic for those stages.
-- Receiving vision mode is tested with a mocked model only; there is no accuracy claim for it.
-- `content_hash` is a content hash, not tamper-evidence: nothing anchors it.
-- `X-Org-Id` scopes data but does not authenticate anyone.
-- HTTP retries: agents built with `make_app` de-duplicate `(org_id, request_id)` **in memory, per process** (D-117). That is not durable and not shared across workers or replicas, so run such agents with one worker. The orchestrator retries an ambiguous failure (timeout or 5xx after sending) only for agents that advertise idempotency in `/health`. In-process retries are de-duplicated separately (D-112).
-- A hung in-process agent thread cannot be killed; it is orphaned (its result discarded, it shares no state, D-111) but keeps using CPU / a model call until it ends. Long-running agents should run in `http` mode or enforce their own timeouts.
+- **Prep is an organiser stub:** Prep stage remains a stub until integrated. It replays CSV rows, is labelled `organiser-stub`, and does not fabricate claims.
+- **Receiving vision mode:** Tested deterministically in recorded mode; live vision mode requires Gemini API credentials.
+- **In-process thread cancellation:** Python cannot kill running threads; timed-out threads are orphaned and their delayed results discarded without corrupting store state.
+- **Storage locking scope:** File locks are process-safe on a single host (`msvcrt`/`fcntl`); multi-node deployments require distributed locking (e.g. Redis/PostgreSQL).
