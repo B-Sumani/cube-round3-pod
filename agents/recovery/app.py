@@ -32,7 +32,7 @@ MODEL_ID = {"name": "recovery-evaluator", "version": "3.0.0", "provider": "pod6"
 def position(line: dict, request: dict) -> tuple[str, str, list[str]]:
     """Determine position for a fee line: (CONTRADICTS | SUPPORTS | SILENT, detail, evidence_ids)."""
     ctype = line.get("charge_type")
-    if ctype == "inbound_defect_fee":
+    if ctype in ("inbound_defect_fee", "prep_fee"):
         prep = previous(request, "prep")
         if prep and prep.get("status") == "completed":
             v = effective_verdict(request, prep)
@@ -41,18 +41,7 @@ def position(line: dict, request: dict) -> tuple[str, str, list[str]]:
             if v == "FAIL":
                 return "SUPPORTS", "Prep evidence shows a defect", [prep["record_id"]]
             return "SILENT", "Prep evidence is uncertain", [prep["record_id"]]
-        
-        # Fallback to Receiving evidence if Prep not present
-        rcv = previous(request, "receiving")
-        if rcv and rcv.get("status") == "completed":
-            v = effective_verdict(request, rcv)
-            if v == "PASS":
-                return "CONTRADICTS", "Receiving evidence shows the unit compliant", [rcv["record_id"]]
-            if v == "FAIL":
-                return "SUPPORTS", "Receiving evidence shows a defect", [rcv["record_id"]]
-            return "SILENT", "Receiving evidence is uncertain", [rcv["record_id"]]
-
-        return "SILENT", "no usable Prep or Receiving record for this subject", []
+        return "SILENT", "no valid completed Prep evidence for this subject", []
 
     if ctype == "refund_issued_item_not_returned":
         ret = previous(request, "returns")

@@ -32,7 +32,8 @@ def handle(request: dict) -> dict:
     refs = [p["ref"] for p in photos(r)]
     checks = [
         check(key, verdict_from(r[col], ok, bad), None, expected=sorted(ok)[0], observed=r[col],
-              evidence_refs=refs, uncertain_reason="poor_image")
+              evidence_refs=refs, uncertain_reason="poor_image",
+              detail=f"[STUB REPLAY] Replayed from sample data: {col}={r[col]}")
         for key, col, ok, bad in RULES if r[col] != "not_required"
     ]
     verdict = "FAIL" if any(c["verdict"] == "FAIL" for c in checks) else (
@@ -43,8 +44,9 @@ def handle(request: dict) -> dict:
         refs={"work_order_id": r["work_order_id"], "fba_shipment_id": r["fba_shipment_id"], "sku": r["sku"],
               "asin": r["asin"], "fnsku": r["fnsku"]},
         checks=checks, outcome=outcome, model=STUB_MODEL, inputs=photos(r),
-        reason=f"stub replay of sample row; {sum(c['verdict'] == 'FAIL' for c in checks)} failed check(s)",
-        payload={"prep_price_usd": float(r["prep_price_usd"]), "measurements": None},
+        reason=f"[STUB] Replay of sample row (Prep agent not integrated yet); {sum(c['verdict'] == 'FAIL' for c in checks)} failed check(s)",
+        payload={"implementation": "organiser-stub", "mode": "organiser-stub", "stub": True,
+                 "prep_price_usd": float(r["prep_price_usd"]), "measurements": None},
     )
     return build_output(record)
 
