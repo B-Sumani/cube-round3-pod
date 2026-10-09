@@ -1,44 +1,108 @@
-# agents/pack/  ·  Pack Manager
+# agents/pack/ — Pack Manager Agent
 
-**Owner:** Member 3 (Pack Manager)  (set `owner` in `agent.json` and the handle in `.github/CODEOWNERS`)
+- **Owner:** @B-Sumani
+- **Agent ID:** `pack-manager@1.0.0`
+- **Implementation:** `gemini-vision-deterministic-evaluator`
+- **Provenance:** Ported from Round 2 submission [`submissions/b-sumani/agent/`](PROVENANCE.md) (`efb6f138`).
 
-> **This folder currently contains an organiser stub** that replays the synthetic Round 2 CSV. It is *not* an agent. Replace it, then replace this README with one that describes what you actually built, how to run it, and its limits.
+---
 
-| | |
-|---|---|
-| **Reads (inputs)** | A photo of the open box before sealing, and the order lines |
-| **Reads (previous evidence)** | Receiving |
-| **Produces** | items present, quantities correct, nothing extra; seal or stop-and-fix |
-| **Recommended `check_key`s** | `items_present, quantities_correct, no_extra_items` |
-| **`decision.outcome` values** | `seal, stop_and_fix, pending_review` |
+## 1. Overview
 
-Only merchant-fulfilled / 3PL units reach Pack (`route == "mfn"`): Amazon packs FBA boxes. Your record is what Returns and Recovery rely on to say what was actually sent, so the `observed_in_box` evidence must be citable.
+The **Pack Manager Agent** validates open shipping cartons at packing stations before sealing, exclusively for merchant-fulfilled/3PL orders (`route == "mfn"`). It verifies that:
+1. Every SKU in the customer order lines is present inside the carton (`items_present`).
+2. Piece counts of each expected item exactly match required quantities (`quantities_correct`).
+3. No foreign, unrecognised, or extraneous items are packed into the carton (`no_extra_items`).
 
-## Where your code goes
+Its outputs form an immutable, cryptographically sealed Evidence Record (`PCK-...`) that downstream stages (Returns, Recovery) cite to prove what was originally dispatched.
+
+---
+
+## 2. Architecture & Modules
 
 ```text
 agents/pack/
-├── app.py          ← expose  handle(agent_input: dict) -> dict  (an Agent Output). Keep `app = make_app(...)` to serve over HTTP.
-├── agent.json      ← stage · agent_id · owner · mode (inproc | http) · url · an honest `implementation` description
-├── PROVENANCE.md   ← your Round 2 repo URL + commit this came from (create it)
-├── README.md       ← this file, rewritten
-└── …               ← your Round 2 code, prompts, rules, fixtures
+├── app.py              # Exposes handle(agent_input) -> Agent Output and FastAPI make_app()
+├── engine.py           # Core pipeline: tenancy, SHA-256 checks, model call, record sealing
+├── model_adapter.py    # Vision adapters: GeminiVisionAdapter (httpx) & MockVisionAdapter
+├── parser.py           # JSON extraction, local string repair, bbox sanitizer, demote_unexpected_skus
+├── evaluator.py        # Deterministic 3-check rules engine (PASS/FAIL/UNCERTAIN, SEAL/STOP_AND_FIX)
+├── catalogue.py        # Org-scoped product catalogues and candidate SKU compiler
+├── mapping.py          # Contract mapping for verdicts, outcomes, and uncertain_reasons
+├── config.py           # Pure dataclass configuration (confidence thresholds, timeouts)
+├── agent.json          # Agent registration manifest
+├── PROVENANCE.md       # Origin repository, commit SHA, and migration details
+├── README.md           # This document
+└── tests/              # Comprehensive unit tests for pack engine, parser, rules, catalogue
 ```
 
-## Integrating, in order
+---
 
-1. Read [`INTEGRATION-GUIDE.md`](../../INTEGRATION-GUIDE.md) and [`EVIDENCE-CONTRACT.md`](../../EVIDENCE-CONTRACT.md); open [`examples/end-to-end/`](../../examples/) for a real Agent Output.
-2. In `handle()`: read `request["subject"]`, `request["inputs"]` (your captures) and `request["previous_evidence"]`; run your agent (**one batched model call per unit**); build the record with `shared.utils.records.build_record()` and wrap it with `build_output()`.
-3. **Fail open.** On a model error return `pending_output(...)`, not an exception. Never invent evidence: if you did not see it, say UNCERTAIN with an `uncertain_reason`.
-4. **Refuse other tenants.** Raise `LookupError` (HTTP 404) for a subject that is not under `subject.org_id`.
-5. Make it idempotent: the same `request_id` must yield the same `record_id`. Use the **latest override** of previous evidence (`context.overrides`).
-6. Run `pytest tests/integration/test_agent_contracts.py`, first on the stub (it passes), then on yours, **with your own fixtures**.
-7. Run the whole system: `make run` and `make test`.
+## 3. Operational Contracts
 
-## Run on its own
+| Property | Value / Specification |
+|---|---|
+| **Applicability** | MFN orders (`case.route == "mfn"`) |
+| **Reads (Inputs)** | Top-down open-box carton photo (`kind="image"`), order lines |
+| **Reads (Previous Evidence)** | Consumes only Receiving evidence (`stage == "receiving"`) |
+| **Check Keys** | `items_present`, `quantities_correct`, `no_extra_items` |
+| **Verdicts** | `PASS`, `FAIL`, `UNCERTAIN` |
+| **Outcomes** | `seal`, `stop_and_fix`, `pending_review` |
+| **Uncertain Reasons** | `poor_image`, `occluded`, `insufficient_evidence`, `model_error`, `conflicting_evidence` |
+| **ID Pattern** | `^PCK-[A-Za-z0-9._-]+$` |
 
+---
+
+## 4. Key Engineering Guarantees
+
+1. **Information Hiding:** Expected order quantities are never revealed to the vision model. The model receives only candidate SKU titles and visual descriptions, forcing independent visual counting.
+2. **Single Model Call:** Exactly one vision model call is performed per unit. Non-candidate SKU detections are demoted to unrecognised items deterministically via `demote_unexpected_skus()` without second LLM queries.
+3. **Fail-Open Behavior:** If the vision model times out, returns HTTP 5xx, or if `GEMINI_API_KEY` is unset, the agent returns a valid `UNCERTAIN` Agent Output (`status="pending"` or `"error"`, `code="model_error"`), never raising an uncaught exception or halting the pipeline.
+4. **Strict Tenancy:** Rejects input file references containing `..` or escaping `INPUT_DIR`. Catalogues are partitioned per organisation (`org_demo_alpha`, `org_demo_bravo`); cross-tenant access immediately raises `LookupError` (`AgentRejected`).
+5. **Deterministic Records:** Same `request_id` produces identical `record_id` and verified `content_hash` by pinning `produced_at` to the subject capture timestamp.
+
+---
+
+## 5. Running the Agent
+
+### In-Process Mode (Default)
+In `agents/pack/agent.json`:
+```json
+{
+  "stage": "pack",
+  "agent_id": "pack-manager@1.0.0",
+  "owner": "@B-Sumani",
+  "mode": "inproc",
+  "module": "agents.pack.app",
+  "implementation": "gemini-vision-deterministic-evaluator"
+}
+```
+
+### Standalone HTTP Service
+Set `"mode": "http"` in `agent.json` and start the server:
 ```sh
-.venv/bin/uvicorn agents.pack.app:app --port 8103
-curl localhost:8103/health
+uvicorn agents.pack.app:app --port 8103
 ```
-Then set `"mode": "http"` in `agent.json` if you want the orchestrator to call it over HTTP.
+Test health:
+```sh
+curl http://localhost:8103/health
+```
+
+---
+
+## 6. Testing
+
+### Run All Pack Unit Tests:
+```sh
+python -m pytest agents/pack/tests -v
+```
+
+### Run Pack Integration Tests:
+```sh
+python -m pytest tests/integration/test_pack_agent.py -v
+```
+
+### Run Full Pod Test Suite:
+```sh
+python -m pytest -q
+```
