@@ -3,6 +3,9 @@
 Starts all stub agents as uvicorn servers on free ports. If your agent is not Python, this still exercises it as long
 as agent.json has mode "http" and your service is up (see shared/contracts/agent-api.md).
 """
+import json
+import shutil
+from pathlib import Path
 import importlib
 import socket
 import threading
@@ -69,14 +72,63 @@ def test_bad_input_is_422_and_wrong_tenant_is_404(http_mode, cases):
     assert httpx.post(f"{url}/run", json=make_input("recovery", case)).status_code == 422, "an agent refuses another stage's input"
 
 
-def test_full_workflow_over_http_matches_in_process(http_mode, cases, monkeypatch):
-    case = next(c for c in cases if c["route"] == "fba" and c["returned"])
+def test_full_workflow_over_http_matches_in_process(
+    http_mode, cases, monkeypatch, tmp_path
+):
+    case = next(
+        c for c in cases
+        if c["route"] == "fba" and c["returned"]
+    )
+
+    # Prepare valid return inputs for this test unit.
+    return_dir = tmp_path / case["unit_id"] / "returns"
+    return_dir.mkdir(parents=True)
+
+    source_dir = (
+        Path(__file__).resolve().parents[2]
+        / "data"
+        / "input"
+        / "UNIT-R3-RET-001"
+        / "returns"
+    )
+
+    return_case = json.loads(
+        (source_dir / "return_case.json").read_text(encoding="utf-8")
+    )
+    return_case["org_id"] = case["org_id"]
+    return_case["subject_id"] = case["unit_id"]
+
+    (return_dir / "return_case.json").write_text(
+        json.dumps(return_case, indent=2),
+        encoding="utf-8",
+    )
+
+    shutil.copyfile(
+        source_dir / "sealed_complete.jpg",
+        return_dir / "sealed_complete.jpg",
+    )
+
+    monkeypatch.setenv("INPUT_DIR", str(tmp_path))
+
+    # Run using HTTP agents.
     over_http = run_workflow(case)
+
+    # Run the same case and inputs in-process.
     monkeypatch.setenv("ORCH_MODE", "inproc")
     in_proc = run_workflow(case)
-    assert (over_http["status"], over_http["final_outcome"]["outcome"]) == (in_proc["status"], in_proc["final_outcome"]["outcome"])
-    assert all(s["state"] in ("completed", "skipped") for s in over_http["stage_results"])
 
+    assert (
+        over_http["status"],
+        over_http["final_outcome"]["outcome"],
+    ) == (
+        in_proc["status"],
+        in_proc["final_outcome"]["outcome"],
+    )
+
+    assert all(
+        stage["state"] in ("completed", "skipped")
+        for stage in over_http["stage_results"]
+    )
 
 def test_dead_agent_is_recorded_not_hidden(monkeypatch, cases):
     monkeypatch.setenv("ORCH_MODE", "http")

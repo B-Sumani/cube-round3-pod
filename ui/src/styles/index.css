@@ -1,0 +1,115 @@
+@import './tokens.css';
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    background-color: var(--cream);
+    color: var(--ink);
+    font-family: 'DM Sans', Inter, system-ui, sans-serif;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-family: 'Young Serif', 'DM Serif Display', Georgia, serif;
+    color: var(--ink);
+  }
+}
+
+@layer components {
+  /* Signature Card */
+  .card-signature {
+    border: 2px solid var(--ink);
+    border-radius: 14px;
+    box-shadow: 4px 4px 0 var(--ink);
+    background-color: var(--card);
+  }
+
+  /* Signature Highlight Card (Peach) */
+  .card-highlight {
+    border: 2px solid var(--ink);
+    border-radius: 14px;
+    box-shadow: 4px 4px 0 var(--ink);
+    background-color: var(--peach);
+  }
+
+  /* Signature Red Error Card */
+  .card-error {
+    border: 2px solid var(--verdict-fail);
+    border-radius: 14px;
+    box-shadow: 4px 4px 0 var(--verdict-fail);
+    background-color: #FFF5F5;
+  }
+
+  /* Buttons */
+  .btn-primary {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    font-weight: 700;
+    padding: 0.625rem 1.25rem;
+    border: 2px solid var(--ink);
+    border-radius: 12px;
+    background-color: var(--mustard);
+    color: var(--ink);
+    box-shadow: 4px 4px 0 var(--ink);
+    transition: all 0.15s ease-in-out;
+    cursor: pointer;
+  }
+
+  .btn-primary:hover:not(:disabled) {
+    transform: translate(-1px, -1px);
+    box-shadow: 5px 5px 0 var(--ink);
+  }
+
+  .btn-primary:active:not(:disabled) {
+    transform: translate(2px, 2px);
+    box-shadow: 2px 2px 0 var(--ink);
+  }
+
+  .btn-primary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    box-shadow: 2px 2px 0 var(--ink);
+  }
+
+  .btn-secondary {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    font-weight: 600;
+    padding: 0.625rem 1.25rem;
+    border: 2px solid var(--ink);
+    border-radius: 12px;
+    background-color: var(--card);
+    color: var(--ink);
+    box-shadow: 4px 4px 0 var(--ink);
+    transition: all 0.15s ease-in-out;
+    cursor: pointer;
+  }
+
+  .btn-secondary:hover:not(:disabled) {
+    transform: translate(-1px, -1px);
+    box-shadow: 5px 5px 0 var(--ink);
+  }
+
+  .btn-secondary:active:not(:disabled) {
+    transform: translate(2px, 2px);
+    box-shadow: 2px 2px 0 var(--ink);
+  }
+
+  .btn-secondary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    box-shadow: 2px 2px 0 var(--ink);
+  }
+
+  /* Accessible focus visible */
+  *:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px var(--mustard), 0 0 0 5px var(--ink);
+  }
+}

@@ -17,14 +17,14 @@ SCHEMAS = {name: f"{name}.schema.json" for name in
 def _registry() -> Registry:
     registry = Registry()
     for path in SCHEMA_DIR.glob("*.schema.json"):
-        doc = json.loads(path.read_text())
+        doc = json.loads(path.read_text(encoding="utf-8"))
         registry = registry.with_resource(doc["$id"], Resource.from_contents(doc))
     return registry
 
 
 @lru_cache(maxsize=None)
 def _validator(name: str) -> Draft202012Validator:
-    doc = json.loads((SCHEMA_DIR / SCHEMAS[name]).read_text())
+    doc = json.loads((SCHEMA_DIR / SCHEMAS[name]).read_text(encoding="utf-8"))
     return Draft202012Validator(doc, registry=_registry(), format_checker=FormatChecker())
 
 

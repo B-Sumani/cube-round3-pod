@@ -1,12 +1,12 @@
 {
-  "pod_id": "pod-XX",
+  "pod_id": "pod-06",
   "pod_type": "standard",
   "flow": "orchestration/flow.json",
   "members": [
     {
       "role": "Receiving Manager",
       "agent": "receiving",
-      "github": ""
+      "github": "Harish2300032959"
     },
     {
       "role": "Prep Manager",
@@ -16,19 +16,19 @@
     {
       "role": "Pack Manager",
       "agent": "pack",
-      "github": ""
+      "github": "B-Sumani"
     },
     {
       "role": "Returns Manager",
       "agent": "returns",
-      "github": ""
+      "github": "Vaishali-39"
     },
     {
       "role": "Recovery Manager",
       "agent": "recovery",
-      "github": ""
+      "github": "hayth31"
     }
   ],
-  "notes": "Fill this in together in your first session: pod_id, each member's GitHub handle, and an orchestration coordinator (a coordinator, not an owner: the Pod owns the orchestration jointly). SPECIALIST PODS (no Prep Manager): set pod_type to \"specialist\", flow to \"orchestration/flow.specialist.json\", and replace the Prep member with {\"role\": \"Specialist / Integration Engineer\", \"agent\": null, \"github\": \"\"}.",
-  "orchestration_coordinator": ""
+  "notes": "Pod 6 Round 3 Pod. Receiving, Pack, Returns, Recovery integrated. Prep is kept as organiser stub until Member 2 brings Round 2 agent in.",
+  "orchestration_coordinator": "Orchestration Engineer"
 }

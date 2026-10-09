@@ -4,8 +4,9 @@
   python -m orchestration.run --unit UNIT-0014 --org org_demo_alpha  # one workflow, printed in full
   python -m orchestration.run --all --flow orchestration/flow.specialist.json
   python -m orchestration.run --case examples/uncertain-path/case.json
-  python -m orchestration.run --resume WF-org_demo_alpha-UNIT-0014
-  python -m orchestration.run --override WF-... --record PRP-0014 --verdict PASS --actor you --reason "..." [--and-resume]
+  python -m orchestration.run --resume WF-org_demo_alpha-UNIT-0014 --org org_demo_alpha
+  python -m orchestration.run --override WF-... --org org_demo_alpha --record PRP-0014 --verdict PASS --actor you --reason "..." [--and-resume]
+With --resume / --override, --org scopes the call to one tenant: another org's workflow is refused.
 State and evidence are written under --out (default out/): workflows/<id>.json and evidence/<record_id>.json.
 """
 from __future__ import annotations
@@ -47,19 +48,19 @@ def main() -> int:
         if not (args.record and args.verdict and args.actor and args.reason):
             ap.error("--override needs --record --verdict --actor --reason")
         wf = apply_override(args.override, store, record_id=args.record, new_verdict=args.verdict,
-                            actor=args.actor, reason=args.reason)
+                            actor=args.actor, reason=args.reason, org_id=args.org)
         if args.and_resume:
-            wf = resume(args.override, flow, store)
+            wf = resume(args.override, flow, store, org_id=args.org)
         print(json.dumps(wf, indent=2))
         return 0
     if args.resume:
-        print(json.dumps(resume(args.resume, flow, store), indent=2))
+        print(json.dumps(resume(args.resume, flow, store, org_id=args.org), indent=2))
         return 0
 
     if args.case:
-        cases = [json.loads(Path(args.case).read_text())]
+        cases = [json.loads(Path(args.case).read_text(encoding="utf-8"))]
     else:
-        cases = json.loads(Path(args.cases).read_text())
+        cases = json.loads(Path(args.cases).read_text(encoding="utf-8"))
         if args.unit:
             cases = [c for c in cases if c["unit_id"] == args.unit and (not args.org or c["org_id"] == args.org)]
         elif not args.all:

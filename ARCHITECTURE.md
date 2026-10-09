@@ -116,15 +116,101 @@ Every failure is **recorded and never becomes success**: a degraded evidence rec
 
 ---
 
-## Your Pod's architecture  ← **replace this section**
+### Our Pod's architecture
 
-_Delete this note and describe **your** system. At minimum:_
+> Status (2026-10-10): **Receiving, Pack, Returns and Recovery are integrated Round 2 agents. Prep is maintained strictly as an organiser stub** (`implementation: "organiser-stub"` in `agents/prep/agent.json`). Pod type: `standard`. Pod ID: `pod-06`.
 
-1. **Diagram** of your actual components and flow, including anything you added.
-2. **What each agent really is**: model, rules, services, dependencies; which are still stubs.
-3. **Your orchestrator**: approach, how workflow state is stored, retries, how evidence is persisted, how overrides work (link the decisions in `docs/decisions.md`).
-4. **Your routing and final-outcome logic**, and how they treat uncertainty and weak evidence.
-5. **Tenancy**: where it is enforced, and how you tested it.
-6. **Failure model**: what you break in the demo and what happens.
-7. **Deployment**: where it runs, how to reach it, how to start it.
-8. **Known limits.**
+### 1. Diagram
+
+```text
+ case {org_id, unit_id, route, returned}
+        │
+        ▼
+ ┌──────────────────────── orchestrator (orchestration/) ─────────────────────────┐
+ │ new_workflow → route each step (flow.json `when`) → build Agent Input          │
+ │   (subject, inputs from data/input/<unit>/<stage>/ with sha256,                │
+ │    ALL previous evidence, context.overrides)                                   │
+ │ → client (inproc | http) → validate output (schema, stage, workflow, tenant,   │
+ │   content_hash, consistency) → store evidence (org-scoped, immutable)          │
+ │ → transition log → next stage … → rollup.py: status + Final Commerce Outcome   │
+ └────────────────────────────────────────────────────────────────────────────────┘
+        │            │ fba          │ mfn          │ returned      │
+        ▼            ▼              ▼              ▼               ▼
+   Receiving ──▶   Prep  ─┐      Pack  ─┐       Returns ─┐      Recovery
+   (Round 2       (stub)  │      (Round 2│       (Round 2│      (Round 2; reads every
+    rules +               └──────────────┴───────────────┴────▶ prior record +
+    vision)                      rules)         rules)          fee report)
+        │
+        ▼
+ FileStore out/workflows/*.json, out/evidence/*.json   (MemoryStore in tests)
+```
+
+### 2. What each agent really is
+
+| Stage | Implementation | Owner | Model calls | Notes |
+|---|---|---|---|---|
+| **Receiving** | **Round 2 agent** (`agents/receiving/`, [PROVENANCE](agents/receiving/PROVENANCE.md)): Round 2 `decision_engine.py` verbatim plus Round 2 `VisionService` | @Harish2300032959 | 0 (recorded mode) / 1 per unit (vision mode) | Rules decide every verdict. Mode declared in `model` and `payload.perception`. Supplier shortfalls tagged as `shortfall_side = "supplier"` (F-10). |
+| **Prep** | **Organiser stub** (CSV replay) | Organisers / Pending | 0 | Left as stub pending member integration. Clearly marked `[STUB REPLAY]` in checks and detail. Does not fabricate claims. |
+| **Pack** | **Round 2 agent** (`agents/pack/`, [PROVENANCE](agents/pack/PROVENANCE.md)): Round 2 packaging assessment engine | @Vaishali-39 | 0 (rule-based) | Validates SKU barcode, packaging type, hazmat, unsealed liquids. Issues `stop_and_fix` on severe packaging defects. |
+| **Returns** | **Round 2 agent** (`agents/returns/`, [PROVENANCE](agents/returns/PROVENANCE.md)): Round 2 return evaluation engine | @hayth31 | 0 (deterministic) | Evaluates return identity, completeness, condition grading, and disposition. Replays sample inputs cleanly when raw files are omitted. |
+| **Recovery** | **Round 2 agent** (`agents/recovery/`, [PROVENANCE](agents/recovery/PROVENANCE.md)): Round 2 audit & dispute engine | @B-Sumani | 0 (audit rules) | Consumes ALL accumulated prior evidence. Disallow false claims on supplier shortfalls (F-10) or missing Prep evidence (F-07). |
+
+### 3. Orchestration
+
+The orchestrator (`orchestration/`) is the central control plane and single source of truth for the commerce pipeline:
+
+- **State Ownership:** The orchestrator owns workflow state (`WorkflowState`). Individual agents never write state or decide the pipeline outcome; agents only emit an `AgentOutput` containing an immutable `EvidenceRecord`. Workflow state is written atomically (via tempfile and atomic file replacement or memory lock) and survives process restarts (`FileStore`).
+- **The Flow:** Configured via `orchestration/flow.json`. Units are routed according to their attributes:
+  - FBA units route through `receiving → prep → recovery`.
+  - MFN / 3PL units route through `receiving → pack → recovery`.
+  - Returns inspection (`returns`) runs if and only if `returned: true`.
+  - Unrouted units (`route: "unknown"`) skip both prep and pack.
+  - Every stage invocation carries the subject (`org_id`, `subject_id`), discovered stage inputs hashed with SHA-256, **all previous evidence records**, and active human overrides.
+- **Status & Outcome Derivation:** Derived strictly via pure functions in `orchestration/rollup.py`:
+  - **Status Precedence:** `FAILED` (if any stage errored or refused) > `BLOCKED` (if an unoverridden stage is UNCERTAIN with `needs_human` or policy `block`) > `RECOVERY_REQUIRED` (if an upstream failure preceded recovery) > `IN_PROGRESS` (if required stages remain pending) > `COMPLETED`.
+  - **Final Outcome Precedence:** `CLAIM_RECOMMENDED` (recoverable channel fee disputed with contradicting evidence) > `EXCEPTION` (any stage failed/defective, e.g. carton damaged or pack `stop_and_fix`) > `INCOMPLETE` (workflow or required stage incomplete) > `NEEDS_REVIEW` (any stage UNCERTAIN) > `CLEAN` (all required stages PASS).
+  - **Provisionality:** `final_outcome.provisional` is strictly `true` whenever `status != "COMPLETED"`.
+  - **Evidence Backing:** `contributing_records` is guaranteed non-empty for every evaluated workflow.
+- **Failure Handling:**
+  - Strict validation of all agent outputs: schema conformance, correct stage name, workflow ID match, tenant match, content hash verification, and internal consistency.
+  - Failures are **never** treated as success: an agent failure or rejection creates a degraded evidence record (`verdict: "UNCERTAIN"`, status `error`, no fabricated checks), and the workflow ends `FAILED` / `INCOMPLETE`.
+  - Transient errors (`agent_timeout`, `agent_unavailable`) are retried according to `flow.defaults.retries`. Non-transient errors (`agent_rejected`, `tenant_mismatch`, `invalid_output`) are never retried.
+  - `resume` re-runs errored or halted stages under a new request ID (`:r2`), preserving the original failed attempt's evidence record intact in the audit trail.
+- **Tenancy:**
+  - Multi-tenancy is enforced in depth: in agent handlers (raising `AgentRejected` / `LookupError`), in orchestrator output validation (detecting `tenant_mismatch`), and at storage level (`MemoryStore` and `FileStore` strictly enforce `org_id` on reads and writes, raising `TenantViolation`).
+  - The API requires `X-Org-Id` and returns 404 for missing or mismatched tenant records to prevent tenant enumeration.
+
+### 4. How to Swap in the Real Prep Agent
+
+When the real Round 2 Prep agent is ready to be merged:
+1. Copy the Prep code into `agents/prep/` (or deploy as an HTTP service).
+2. Edit `agents/prep/agent.json`:
+   - Change `"implementation": "organiser-stub"` to `"implementation": "real"`.
+   - Update `"owner"` with the Prep owner's handle.
+   - Set `"mode": "inproc"` (with `handle(request)` defined in `agents/prep/app.py`) or `"mode": "http"` (with endpoint configuration).
+3. Ensure the Prep agent returns valid evidence with checks (`polybag_check`, `barcode_scannable`, `fragile_bubble_wrap`, etc.) and a SHA-256 sealed envelope.
+4. Recovery will automatically consume the real Prep evidence and un-silence inbound defect fee claims when Prep evidence contradicts Amazon charges.
+5. Verify with `pytest tests/integration/test_prep_handling.py` and `pytest tests/e2e/`.
+
+### 5. Failure model (what we break in the demo)
+
+| Injected | What happens |
+|---|---|
+| Receiving model error / timeout (vision mode) | Receiving returns a `pending` record (no checks, `model_error`). The orchestrator retries, then the workflow is `FAILED`, outcome `INCOMPLETE`, `provisional: true`. |
+| Agent unreachable (HTTP mode, nothing listening) | `agent_unavailable` degraded record, then `FAILED`. |
+| Invalid output / wrong tenant in output | Rejected before storage, error recorded, `FAILED`. |
+| UNCERTAIN identity (e.g. UNIT-0029) | `BLOCKED` / `NEEDS_REVIEW`. `apply_override` by a named actor is recorded and the outcome re-derived; the original record is unchanged. |
+| Pack defect (`stop_and_fix`) | `EXCEPTION` outcome with `needs_human: true`. Package held on line until human override. |
+
+### 6. Deployment
+
+- **In-process (single process):** `python -m orchestration.run` (CLI) or `uvicorn orchestration.api:app --port 8100` (API).
+- **HTTP mode:** Run each agent with `uvicorn agents.<stage>.app:app --port <port>` and set `<STAGE>_URL`.
+- **UI:** Single Page Application under `ui/` built with Vite (`npm run build` -> `ui/dist/`), communicating with orchestrator API at `/workflows`, `/workflows/{id}`, `/workflows/{id}/evidence`, etc.
+
+### 7. Known limits
+
+- **Prep is an organiser stub:** Prep stage remains a stub until integrated. It replays CSV rows, is labelled `organiser-stub`, and does not fabricate claims.
+- **Receiving vision mode:** Tested deterministically in recorded mode; live vision mode requires Gemini API credentials.
+- **In-process thread cancellation:** Python cannot kill running threads; timed-out threads are orphaned and their delayed results discarded without corrupting store state.
+- **Storage locking scope:** File locks are process-safe on a single host (`msvcrt`/`fcntl`); multi-node deployments require distributed locking (e.g. Redis/PostgreSQL).

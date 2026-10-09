@@ -1,0 +1,146 @@
+{
+  "_note": "Ground truth per Pod unit, written from the scenario (what is physically true), not from agent output. Final outcomes assume orchestration/flow.json defaults (on_uncertain=continue).",
+  "units": {
+    "UNIT-P001": {
+      "scenario": "Clean FBA receipt; only a weight-tier fee with no measured weight upstream (SILENT).",
+      "receiving_checks": {
+        "identity_match": "PASS",
+        "carton_count": "PASS",
+        "units_per_carton": "PASS",
+        "quantity": "PASS",
+        "carton_damage": "PASS",
+        "unit_damage": "PASS",
+        "quality_flags": "PASS"
+      },
+      "final_outcome": "CLEAN",
+      "claimable_usd": null
+    },
+    "UNIT-P002": {
+      "scenario": "Clean MFN receipt, box packed correctly, no fees.",
+      "receiving_checks": {
+        "identity_match": "PASS",
+        "carton_count": "PASS",
+        "units_per_carton": "PASS",
+        "quantity": "PASS",
+        "carton_damage": "PASS",
+        "unit_damage": "PASS",
+        "quality_flags": "PASS"
+      },
+      "final_outcome": "CLEAN",
+      "claimable_usd": null
+    },
+    "UNIT-P003": {
+      "scenario": "Supplier short-shipped: 2 cartons of 10 instead of 12 (20/24). A lost_inbound channel line exists but the loss is supplier-side (F-10): must NOT become a channel claim.",
+      "receiving_checks": {
+        "identity_match": "PASS",
+        "carton_count": "PASS",
+        "units_per_carton": "FAIL",
+        "quantity": "FAIL",
+        "carton_damage": "PASS",
+        "unit_damage": "PASS",
+        "quality_flags": "PASS"
+      },
+      "final_outcome": "EXCEPTION",
+      "claimable_usd": null
+    },
+    "UNIT-P004": {
+      "scenario": "Carton visibly crushed on arrival (MFN, org_demo_bravo).",
+      "receiving_checks": {
+        "identity_match": "PASS",
+        "carton_count": "PASS",
+        "units_per_carton": "PASS",
+        "quantity": "PASS",
+        "carton_damage": "FAIL",
+        "unit_damage": "PASS",
+        "quality_flags": "PASS"
+      },
+      "final_outcome": "EXCEPTION",
+      "claimable_usd": null
+    },
+    "UNIT-P005": {
+      "scenario": "Wrong variant received (colour differs from PO); operator flagged wrong_colour.",
+      "receiving_checks": {
+        "identity_match": "FAIL",
+        "carton_count": "PASS",
+        "units_per_carton": "PASS",
+        "quantity": "PASS",
+        "carton_damage": "PASS",
+        "unit_damage": "PASS",
+        "quality_flags": "FAIL"
+      },
+      "final_outcome": "EXCEPTION",
+      "claimable_usd": null
+    },
+    "UNIT-P006": {
+      "scenario": "Identity could not be confirmed at receipt (label unreadable). Needs a person.",
+      "receiving_checks": {
+        "identity_match": "UNCERTAIN",
+        "carton_count": "PASS",
+        "units_per_carton": "PASS",
+        "quantity": "PASS",
+        "carton_damage": "PASS",
+        "unit_damage": "PASS",
+        "quality_flags": "PASS"
+      },
+      "final_outcome": "NEEDS_REVIEW",
+      "claimable_usd": null
+    },
+    "UNIT-P007": {
+      "scenario": "PO is internally inconsistent: 2 cartons x 12 = 24 but PO says 30. 24 arrived. Shortage cannot be judged until the PO is corrected.",
+      "receiving_checks": {
+        "identity_match": "PASS",
+        "carton_count": "PASS",
+        "units_per_carton": "PASS",
+        "quantity": "UNCERTAIN",
+        "carton_damage": "PASS",
+        "unit_damage": "PASS",
+        "quality_flags": "PASS"
+      },
+      "final_outcome": "NEEDS_REVIEW",
+      "claimable_usd": null
+    },
+    "UNIT-P008": {
+      "scenario": "Supplier repacked: 3 cartons of 8 instead of 2 of 12; total 24 matches PO. Carton and per-carton counts deviate, total does not.",
+      "receiving_checks": {
+        "identity_match": "PASS",
+        "carton_count": "FAIL",
+        "units_per_carton": "FAIL",
+        "quantity": "PASS",
+        "carton_damage": "PASS",
+        "unit_damage": "PASS",
+        "quality_flags": "PASS"
+      },
+      "final_outcome": "EXCEPTION",
+      "claimable_usd": null
+    },
+    "UNIT-P009": {
+      "scenario": "Clean FBA unit, Prep compliant; channel charged an inbound_defect_fee of 3.50. Prep evidence contradicts the charge -> claim (standard flow). Specialist flow (no Prep): SILENT -> CLEAN, no claim.",
+      "receiving_checks": {
+        "identity_match": "PASS",
+        "carton_count": "PASS",
+        "units_per_carton": "PASS",
+        "quantity": "PASS",
+        "carton_damage": "PASS",
+        "unit_damage": "PASS",
+        "quality_flags": "PASS"
+      },
+      "final_outcome": "CLAIM_RECOMMENDED",
+      "claimable_usd": 3.5,
+      "final_outcome_specialist": "CLEAN"
+    },
+    "UNIT-P010": {
+      "scenario": "Clean MFN unit, returned complete and correct; channel charged refund_issued_item_not_returned 19.99. Returns evidence contradicts it -> claim.",
+      "receiving_checks": {
+        "identity_match": "PASS",
+        "carton_count": "PASS",
+        "units_per_carton": "PASS",
+        "quantity": "PASS",
+        "carton_damage": "PASS",
+        "unit_damage": "PASS",
+        "quality_flags": "PASS"
+      },
+      "final_outcome": "CLAIM_RECOMMENDED",
+      "claimable_usd": 19.99
+    }
+  }
+}

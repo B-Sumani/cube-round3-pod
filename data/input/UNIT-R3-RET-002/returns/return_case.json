@@ -1,0 +1,18 @@
+﻿{
+  "record_id": "RTN-UNIT-R3-RET-002",
+  "org_id": "org_demo_alpha",
+  "subject_id": "UNIT-R3-RET-002",
+  "operator_id": "op_test",
+  "captured_at": "2026-10-08T12:10:00Z",
+  "order_id": "ORD-R3-RET-002",
+  "ordered_sku": "SKU-TEST-002",
+  "ordered_asin": "ASIN-TEST-002",
+  "parts_list": [
+    "product",
+    "packaging",
+    "expected accessories"
+  ],
+  "parts_missing": [],
+  "amazon_condition": "New",
+  "operator_disposition": "restock"
+}
