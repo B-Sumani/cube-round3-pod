@@ -27,7 +27,7 @@ def data_dir() -> Path:
 
 @lru_cache(maxsize=None)
 def _rows(kind: str, directory: str) -> tuple[dict, ...]:
-    with open(Path(directory) / FILES[kind], newline="") as fh:
+    with open(Path(directory) / FILES[kind], newline="", encoding="utf-8") as fh:
         return tuple(csv.DictReader(fh))
 
 

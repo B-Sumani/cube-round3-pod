@@ -138,7 +138,7 @@ make run                                                    # all sample workflo
 make case UNIT=UNIT-0014 ORG=org_demo_alpha                 # one, printed in full
 python -m orchestration.run --resume WF-org_demo_alpha-UNIT-0014
 python -m orchestration.run --override WF-… --record PRP-0014 --verdict PASS --actor you --reason "…" --and-resume
-make serve        # POST /workflows · GET /workflows/{id}[/evidence] · POST …/resume · POST …/overrides · GET /health
+make serve        # POST /workflows · GET /workflows/{id}[/evidence] · POST …/resume · POST …/overrides (all with header X-Org-Id) · GET /health
 ```
 
 ## 11. What is left to you

@@ -1,10 +1,10 @@
 {
   "stage": "receiving",
-  "agent_id": "receiving-stub@0",
-  "owner": "@github-handle-of-the-owner",
+  "agent_id": "receiving-r2@1.0",
+  "owner": "@Harish2300032959",
   "mode": "inproc",
   "url": "http://localhost:8101",
   "module": "agents.receiving.app",
-  "implementation": "organiser-stub",
-  "notes": "Set mode to \"http\" if your agent is not Python or runs as its own service. Change implementation to a short honest description of what you built."
+  "implementation": "round2-agent: Round 2 Receiving Manager deterministic rules (decision_engine.py) + Round 2 VisionService. Default 'recorded' mode runs the operator-recorded receipt through the Round 2 rules with no model call; 'vision' mode (RECEIVING_VISION=on + OPENAI_API_KEY + image captures in data/input) makes one batched multimodal call per unit. See PROVENANCE.md.",
+  "notes": "Owner handle set from the local git user; correct it if the Receiving member uses a different GitHub handle."
 }
