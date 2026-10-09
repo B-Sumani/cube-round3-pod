@@ -13,6 +13,7 @@ What it does for you (keep or replace, but keep the behaviour; it is tested):
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -26,7 +27,7 @@ from shared.utils.schema import errors as schema_errors
 
 from .clients import AgentRejected, AgentTimeout, AgentUnavailable, client_for, load_manifest
 from .rollup import derive_final_outcome, derive_status, effective
-from .store import MemoryStore
+from .store import EvidenceConflict, MemoryStore, TenantViolation
 
 ROOT = Path(__file__).resolve().parents[1]
 logger = get_logger("orchestrator")
@@ -38,12 +39,12 @@ KINDS = {".jpg": "image", ".jpeg": "image", ".png": "image", ".webp": "image", "
 def default_flow_path() -> Path:
     """The flow named in pod.json (Specialist Pods run flow.specialist.json), else flow.json."""
     pod = ROOT / "pod.json"
-    rel = json.loads(pod.read_text()).get("flow") if pod.exists() else None
+    rel = json.loads(pod.read_text(encoding="utf-8")).get("flow") if pod.exists() else None
     return ROOT / (rel or "orchestration/flow.json")
 
 
 def load_flow(path: str | Path | None = None) -> dict:
-    return json.loads(Path(path or default_flow_path()).read_text())
+    return json.loads(Path(path or default_flow_path()).read_text(encoding="utf-8"))
 
 
 def flow_stages(flow: dict | None = None) -> list[str]:
@@ -61,13 +62,14 @@ def discover_inputs(subject_id: str, stage: str) -> list[dict]:
     """Captures for one stage live in data/input/<subject_id>/<stage>/ (override the root with INPUT_DIR).
 
     Each file becomes a content-addressed input {ref, kind, sha256}. Refs are relative to the input root:
-    never absolute (no local paths in evidence).
+    never absolute (no local paths in evidence), always "/"-separated so the same capture has the same ref on
+    every OS.
     """
     root = Path(os.environ.get("INPUT_DIR", ROOT / "data" / "input"))
     folder = root / subject_id / stage
     if not folder.is_dir():
         return []
-    return [{"ref": str(p.relative_to(root)), "kind": KINDS.get(p.suffix.lower(), "other"),
+    return [{"ref": p.relative_to(root).as_posix(), "kind": KINDS.get(p.suffix.lower(), "other"),
              "sha256": hashlib.sha256(p.read_bytes()).hexdigest()}
             for p in sorted(folder.iterdir()) if p.is_file() and not p.name.startswith(".")]
 
@@ -123,7 +125,7 @@ def new_workflow(case: dict, flow: dict) -> dict:
 def _previous_evidence(wf: dict, upto: int, store) -> list[dict]:
     out = []
     for sr in wf["stage_results"][:upto]:
-        if sr["record_id"] and (rec := store.get_evidence(sr["record_id"])):
+        if sr["record_id"] and (rec := store.get_evidence(sr["record_id"], wf["org_id"])):
             out.append(rec)
     return out
 
@@ -169,10 +171,16 @@ def _run_stage(wf: dict, sr: dict, idx: int, opts: dict, store, client) -> dict 
             out = client.run(request, float(opts["timeout_s"]))
             err = None
             break
-        except AgentTimeout as exc:
-            err = error_obj("agent_timeout", str(exc), retryable=True, stage=stage)
-        except AgentUnavailable as exc:
-            err = error_obj("agent_unavailable", str(exc), retryable=True, stage=stage)
+        except AgentUnavailable as exc:  # includes AgentTimeout
+            code = "agent_timeout" if isinstance(exc, AgentTimeout) else "agent_unavailable"
+            err = error_obj(code, str(exc), retryable=True, stage=stage)
+            # D-117: the request may have been delivered and acted on. Re-sending it is only safe if the agent
+            # de-duplicates request_id; otherwise a retry could repeat a model call or other side effect.
+            if (getattr(exc, "ambiguous", False) and sr["attempts"] <= int(opts["retries"])
+                    and not getattr(client, "idempotent", False)):
+                _log(wf, "retry_skipped", stage, f"{code} after the request may have been delivered, and the agent "
+                     "does not advertise idempotency; resume retries it with a new request_id")
+                break
         except AgentRejected as exc:
             err = error_obj("agent_rejected", str(exc), retryable=False, stage=stage)
             break
@@ -193,7 +201,15 @@ def _run_stage(wf: dict, sr: dict, idx: int, opts: dict, store, client) -> dict 
         _log(wf, "stage_degraded", stage, f"{err['code']}: recorded as {out['evidence']['status']}; flow policy decides what next")
 
     ev = out["evidence"]
-    store.put_evidence(ev)
+    try:
+        store.put_evidence(ev, wf["org_id"])  # the store re-checks tenancy and immutability: defence in depth
+    except (EvidenceConflict, LookupError, ValueError) as exc:  # refused by the store: record it, never crash (D-113)
+        code = "tenant_mismatch" if isinstance(exc, TenantViolation) else "invalid_output"
+        err = error_obj(code, f"store refused the agent's record: {exc}", retryable=False, stage=stage)
+        _log(wf, "invalid_output", stage, err["message"])
+        out = pending_output(request, code=err["code"], message=err["message"], retryable=False, agent_id=sr["agent_id"])
+        ev = out["evidence"]
+        store.put_evidence(ev, wf["org_id"])
     if ev["record_id"] not in wf["evidence_references"]:
         wf["evidence_references"].append(ev["record_id"])
     agent_err = ev.get("error") or err
@@ -217,12 +233,12 @@ def _run_stage(wf: dict, sr: dict, idx: int, opts: dict, store, client) -> dict 
 
 
 def _finalize(wf: dict, store) -> dict:
-    evidence = {rid: store.get_evidence(rid) for rid in wf["evidence_references"]}
+    evidence = {rid: store.get_evidence(rid, wf["org_id"]) for rid in wf["evidence_references"]}
     status, reason = derive_status(wf, evidence)
     _set_status(wf, status, reason)
     wf["final_outcome"] = derive_final_outcome(wf, evidence, status)
     wf["timestamps"]["completed_at"] = utcnow() if status == "COMPLETED" else None
-    store.save_workflow(wf)
+    store.save_workflow(wf, wf["org_id"])
     return wf
 
 
@@ -233,7 +249,7 @@ def advance(wf: dict, flow: dict, store, clients: dict | None = None) -> dict:
     steps = {s["stage"]: s for s in flow["steps"]}
     wf["halted"] = None
     _set_status(wf, "IN_PROGRESS", "advancing")
-    store.save_workflow(wf)
+    store.save_workflow(wf, wf["org_id"])
     for idx, sr in enumerate(wf["stage_results"]):
         if sr["state"] in ("completed", "skipped"):
             continue
@@ -241,7 +257,7 @@ def advance(wf: dict, flow: dict, store, clients: dict | None = None) -> dict:
         opts = {**defaults, **{k: v for k, v in step.items() if k not in ("stage", "when")}}
         client = (clients or {}).get(sr["stage"]) or client_for(sr["stage"])
         halt = _run_stage(wf, sr, idx, opts, store, client)
-        store.save_workflow(wf)
+        store.save_workflow(wf, wf["org_id"])
         if halt:
             wf["halted"] = {"stage": sr["stage"], "reason": halt, "at": utcnow()}
             _log(wf, "halted", sr["stage"], halt)
@@ -249,35 +265,54 @@ def advance(wf: dict, flow: dict, store, clients: dict | None = None) -> dict:
     return _finalize(wf, store)
 
 
+def _locked(store, workflow_id: str):
+    """Per-workflow lock (D-115): load -> advance -> save happen under it, so two callers never run a stage twice or
+    save over each other's updates. A store without workflow_lock() (third-party) runs unlocked."""
+    lock = getattr(store, "workflow_lock", None)
+    return lock(workflow_id) if lock else contextlib.nullcontext()
+
+
 def run_workflow(case: dict, flow: dict | None = None, store=None, clients: dict | None = None) -> dict:
     """Start (or continue) the workflow for a case. Idempotent: an existing workflow is advanced, not duplicated."""
     flow, store = flow or load_flow(), store or MemoryStore()
-    wf = store.load_workflow(workflow_id_for(case)) or new_workflow(case, flow)
-    return advance(wf, flow, store, clients)
+    with _locked(store, workflow_id_for(case)):
+        wf = store.load_workflow(workflow_id_for(case), case["org_id"]) or new_workflow(case, flow)
+        return advance(wf, flow, store, clients)
 
 
-def resume(workflow_id: str, flow: dict | None = None, store=None, clients: dict | None = None) -> dict:
-    """Continue after a halt, a person's decision, or a failure (errored stages are retried)."""
+def resume(workflow_id: str, flow: dict | None = None, store=None, clients: dict | None = None,
+           org_id: str | None = None) -> dict:
+    """Continue after a halt, a person's decision, or a failure (errored stages are retried).
+
+    Pass `org_id` from any caller acting for a tenant (API, CLI): another org's workflow is then refused."""
     flow = flow or load_flow()
-    wf = store.load_workflow(workflow_id)
-    if wf is None:
-        raise KeyError(workflow_id)
-    _log(wf, "resumed", detail=f"from status {wf['status']}")
-    return advance(wf, flow, store, clients)
+    with _locked(store, workflow_id):
+        wf = store.load_workflow(workflow_id, org_id)
+        if wf is None:
+            raise KeyError(workflow_id)
+        _log(wf, "resumed", detail=f"from status {wf['status']}")
+        return advance(wf, flow, store, clients)
 
 
 def apply_override(workflow_id: str, store, *, record_id: str, new_verdict: str, actor: str, reason: str,
-                   new_outcome: str | None = None) -> dict:
+                   new_outcome: str | None = None, org_id: str | None = None) -> dict:
     """A person (or rule) changes the effective decision of a record. Nothing is deleted or rewritten:
     the new entry references the evidence and the previous effective decision, and the state is re-derived."""
     if not actor.strip() or not reason.strip():
         raise ValueError("an override needs an actor and a reason")
-    wf = store.load_workflow(workflow_id)
+    with _locked(store, workflow_id):  # never interleaves with an advance of the same workflow (D-115)
+        return _apply_override(workflow_id, store, record_id=record_id, new_verdict=new_verdict, actor=actor,
+                               reason=reason, new_outcome=new_outcome, org_id=org_id)
+
+
+def _apply_override(workflow_id: str, store, *, record_id: str, new_verdict: str, actor: str, reason: str,
+                    new_outcome: str | None, org_id: str | None) -> dict:
+    wf = store.load_workflow(workflow_id, org_id)
     if wf is None:
         raise KeyError(workflow_id)
     if record_id not in wf["evidence_references"]:
         raise ValueError(f"{record_id} is not evidence in {workflow_id}")
-    record = store.get_evidence(record_id)
+    record = store.get_evidence(record_id, wf["org_id"])
     previous_verdict, _ = effective(wf, record)
     earlier = [o for o in wf["overrides"] if o["supersedes"]["record_id"] == record_id]
     entry = {"override_id": f"OVR-{len(wf['overrides']) + 1:03d}",
@@ -292,4 +327,4 @@ def apply_override(workflow_id: str, store, *, record_id: str, new_verdict: str,
 
 def bundle(wf: dict, store) -> dict:
     """The workflow plus every evidence record it references: a self-contained, reviewable export."""
-    return {"workflow": wf, "evidence": {rid: store.get_evidence(rid) for rid in wf["evidence_references"]}}
+    return {"workflow": wf, "evidence": {rid: store.get_evidence(rid, wf["org_id"]) for rid in wf["evidence_references"]}}

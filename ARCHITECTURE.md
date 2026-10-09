@@ -116,15 +116,75 @@ Every failure is **recorded and never becomes success**: a degraded evidence rec
 
 ---
 
-## Your Pod's architecture  ← **replace this section**
+## Our Pod's architecture
 
-_Delete this note and describe **your** system. At minimum:_
+> Status (2026-10-09): **Receiving is our integrated Round 2 agent. Prep, Pack, Returns and Recovery are still organiser stubs** (`implementation: organiser-stub` in each `agent.json`), until each owner brings their Round 2 agent in. Pod type: `standard` (default; confirm with the organisers).
 
-1. **Diagram** of your actual components and flow, including anything you added.
-2. **What each agent really is**: model, rules, services, dependencies; which are still stubs.
-3. **Your orchestrator**: approach, how workflow state is stored, retries, how evidence is persisted, how overrides work (link the decisions in `docs/decisions.md`).
-4. **Your routing and final-outcome logic**, and how they treat uncertainty and weak evidence.
-5. **Tenancy**: where it is enforced, and how you tested it.
-6. **Failure model**: what you break in the demo and what happens.
-7. **Deployment**: where it runs, how to reach it, how to start it.
-8. **Known limits.**
+### 1. Diagram
+
+```text
+ case {org_id, unit_id, route, returned}
+        │
+        ▼
+ ┌──────────────────────── orchestrator (orchestration/) ─────────────────────────┐
+ │ new_workflow → route each step (flow.json `when`) → build Agent Input          │
+ │   (subject, inputs from data/input/<unit>/<stage>/ with sha256,                │
+ │    ALL previous evidence, context.overrides)                                   │
+ │ → client (inproc | http) → validate output (schema, stage, workflow, tenant,   │
+ │   content_hash, consistency) → store evidence (org-scoped, immutable)          │
+ │ → transition log → next stage … → rollup.py: status + Final Commerce Outcome   │
+ └────────────────────────────────────────────────────────────────────────────────┘
+        │            │ fba          │ mfn          │ returned      │
+        ▼            ▼              ▼              ▼               ▼
+  Receiving ──▶   Prep  ─┐      Pack  ─┐       Returns ─┐      Recovery
+  (Round 2       (stub)  │      (stub) │       (stub)   │      (stub; reads every
+   rules +               └──────────────┴────────────────┴────▶ prior record +
+   vision)                                                       fee report)
+        │
+        ▼
+ FileStore out/workflows/*.json, out/evidence/*.json   (MemoryStore in tests)
+```
+
+### 2. What each agent really is
+
+| Stage | Implementation | Model calls | Notes |
+|---|---|---|---|
+| Receiving | **Round 2 agent** (`agents/receiving/`, [PROVENANCE](agents/receiving/PROVENANCE.md)): Round 2 `decision_engine.py` verbatim plus Round 2 `VisionService` | 0 (recorded mode) / 1 per unit (vision mode) | Rules decide every verdict. Mode is declared in `model` and `payload.perception`. |
+| Prep | organiser stub (CSV replay) | 0 | owner to integrate |
+| Pack | organiser stub | 0 | owner to integrate |
+| Returns | organiser stub | 0 | owner to integrate |
+| Recovery | organiser stub | 0 | owner to integrate; already keeps F-10 shortfalls SILENT |
+
+### 3. Orchestrator
+
+The starter engine is kept. It is tested and matches D-001…D-004. State is a JSON workflow document per `(org, unit)`, written atomically (`tmp` + `replace`), so a restart resumes from the file. Timeouts: `timeout_s` is enforced for HTTP and, since D-110, for in-process agents too (worker thread; a late answer is discarded). Concurrency: one caller at a time per workflow (thread + OS file lock; a waiter gets 409 after `ORCH_LOCK_TIMEOUT_S`, D-115), and evidence is created atomically (D-116). Retries: `flow.defaults.retries` for `agent_timeout`/`agent_unavailable`; never for `agent_rejected`/`invalid_output`/`tenant_mismatch`. Evidence is immutable: re-writing a `record_id` with different content raises. Overrides are appended workflow entries that reference the superseded record; downstream agents receive them in `context.overrides`. See D-101…D-109.
+
+### 4. Routing and final outcome
+
+Routing: `flow.json` (D-000). Receiving always runs, then Prep for FBA or Pack for MFN, then Returns only if returned, then Recovery. Final outcome: `rollup.py` precedence `CLAIM_RECOMMENDED > EXCEPTION > INCOMPLETE > NEEDS_REVIEW > CLEAN`. UNCERTAIN is never turned into PASS. A Receiving UNCERTAIN sets `needs_human`, so the workflow is `BLOCKED` / `NEEDS_REVIEW` until an override is recorded.
+
+### 5. Tenancy
+
+Enforced in three places: (a) every agent looks up its subject scoped by `org_id` and raises `LookupError` → 404 / `AgentRejected` otherwise; (b) the orchestrator rejects any output whose evidence names another org or subject (`tenant_mismatch`); (c) **storage**: every store read and write is org-scoped (`TenantViolation`), and the API requires `X-Org-Id` and returns 404 for another org's workflow (D-106). Tests: `tests/integration/test_store_tenancy.py`, `test_agent_contracts.py::test_other_tenant_gets_nothing`, `test_receiving_agent.py::test_wrong_tenant_is_refused`.
+
+### 6. Failure model (what we break in the demo)
+
+| Injected | What happens |
+|---|---|
+| Receiving model error / timeout (vision mode) | Receiving returns a `pending` record (no checks, `model_error`). The orchestrator retries, then the workflow is `FAILED`, outcome `INCOMPLETE`, `provisional: true`. |
+| Agent unreachable (HTTP mode, nothing listening) | `agent_unavailable` degraded record, then `FAILED`. |
+| Invalid output / wrong tenant in output | Rejected before storage, error recorded, `FAILED`. |
+| UNCERTAIN identity (e.g. UNIT-0029) | `BLOCKED` / `NEEDS_REVIEW`. `apply_override` by a named actor is recorded and the outcome re-derived; the original record is unchanged. |
+
+### 7. Deployment
+
+Local only so far: `make run` / `.\pod.ps1 run` (CLI) and `make serve` / `.\pod.ps1 serve` (API on :8100). Any agent can run as its own service with `uvicorn agents.<stage>.app:app` and `mode: http`. No public URL yet.
+
+### 8. Known limits
+
+- Four of five stages are still stubs. End-to-end results reflect stub logic for those stages.
+- Receiving vision mode is tested with a mocked model only; there is no accuracy claim for it.
+- `content_hash` is a content hash, not tamper-evidence: nothing anchors it.
+- `X-Org-Id` scopes data but does not authenticate anyone.
+- HTTP retries: agents built with `make_app` de-duplicate `(org_id, request_id)` **in memory, per process** (D-117). That is not durable and not shared across workers or replicas, so run such agents with one worker. The orchestrator retries an ambiguous failure (timeout or 5xx after sending) only for agents that advertise idempotency in `/health`. In-process retries are de-duplicated separately (D-112).
+- A hung in-process agent thread cannot be killed; it is orphaned (its result discarded, it shares no state, D-111) but keeps using CPU / a model call until it ends. Long-running agents should run in `http` mode or enforce their own timeouts.

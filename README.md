@@ -51,7 +51,7 @@ make setup            # venv + dependencies + .env
 make test             # integration, end-to-end, failure, UNCERTAIN, override and HTTP tests
 make run              # all sample workflows end to end -> out/workflows/*.json and out/evidence/*.json
 make case UNIT=UNIT-0014 ORG=org_demo_alpha     # one workflow, in full
-make serve            # orchestrator API on :8100 (POST /workflows, GET /workflows/{id}, GET /health)
+make serve            # orchestrator API on :8100 (POST /workflows, GET /workflows/{id} with X-Org-Id header, GET /health)
 ```
 
 Out of the box everything runs on **organiser stub agents** replaying the synthetic Round 2 CSVs. **Replacing a stub with your real agent is your job.**
