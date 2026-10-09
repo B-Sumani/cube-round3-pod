@@ -1,9 +1,10 @@
-"""Test Prep stub handling and Recovery behavior on missing/stubbed Prep.
+"""Test Prep agent handling and Recovery behavior on real and missing Prep.
 
-Enforces Step 2 requirements:
-- Prep is clearly labelled as a stub in agent.json and evidence output.
+Enforces Step 2 and Step 6 requirements:
+- Prep is configured as a real agent in agent.json and produces valid evidence.
 - Missing or errored Prep never produces a claim by itself in Recovery.
 - Inbound-defect and prep-fee charges with no valid completed Prep evidence remain SILENT.
+- Real completed Prep evidence contradicting a charge produces a claim in Recovery.
 """
 import pytest
 from orchestration.clients import AgentTimeout, client_for, load_manifest, InProcClient
@@ -12,11 +13,12 @@ from orchestration.store import MemoryStore
 from tests.helpers import Boom, Fake
 
 
-def test_prep_is_explicitly_labelled_as_stub():
+def test_prep_is_configured_as_real_agent():
     manifest = load_manifest("prep")
-    assert manifest["implementation"] == "organiser-stub"
-    assert "stub" in manifest["agent_id"]
-    assert "stub" in manifest["notes"].lower()
+    assert manifest["implementation"] == "real"
+    assert manifest["owner"] == "@B-Sumani"
+    assert manifest["mode"] == "inproc"
+    assert "stub" not in manifest["agent_id"]
 
     client = client_for("prep")
     req = {
@@ -31,9 +33,28 @@ def test_prep_is_explicitly_labelled_as_stub():
     }
     out = client.run(req, 30)
     ev = out["evidence"]
-    assert ev["payload"].get("stub") is True
-    assert ev["payload"].get("implementation") == "organiser-stub"
-    assert any("[STUB" in c.get("detail", "") for c in ev["checks"])
+    assert ev["stage"] == "prep"
+    assert ev["agent_id"] == manifest["agent_id"]
+    assert ev["decision"]["verdict"] in ("PASS", "FAIL", "UNCERTAIN")
+    assert ev["model"]["name"] != "csv-replay-stub"
+    assert not ev["payload"].get("stub")
+
+
+def test_prep_refuses_cross_tenant_request():
+    client = client_for("prep")
+    req = {
+        "schema_version": "1.0",
+        "request_id": "WF-test:prep-tenant",
+        "workflow_id": "WF-org_demo_bravo-UNIT-0014",
+        "stage": "prep",
+        # UNIT-0014 belongs to org_demo_alpha, not org_demo_bravo
+        "subject": {"org_id": "org_demo_bravo", "subject_id": "UNIT-0014", "route": "fba"},
+        "inputs": [],
+        "previous_evidence": [],
+        "context": {"overrides": [], "case": {}},
+    }
+    with pytest.raises(Exception):
+        client.run(req, 30)
 
 
 def test_missing_prep_leaves_inbound_defect_fee_silent():
@@ -82,3 +103,21 @@ def test_failed_prep_leaves_inbound_defect_fee_silent_and_workflow_incomplete():
 
     assert wf["final_outcome"]["outcome"] == "INCOMPLETE"
     assert wf["final_outcome"]["claimable_usd"] is None
+
+
+def test_real_prep_compliant_evidence_refutes_charge_in_recovery():
+    """When real Prep finds unit compliant, Recovery refutes inbound_defect_fee and recommends a claim."""
+    flow = load_flow()
+    case = {"org_id": "org_demo_alpha", "unit_id": "UNIT-0014", "route": "fba", "returned": False}
+    store = MemoryStore()
+    wf = run_workflow(case, flow, store)
+
+    assert wf["status"] == "COMPLETED"
+    assert wf["final_outcome"]["outcome"] == "CLAIM_RECOMMENDED"
+    assert wf["final_outcome"]["claimable_usd"] == 2.0
+
+    rcy_record_id = next(s["record_id"] for s in wf["stage_results"] if s["stage"] == "recovery")
+    rcy = store.get_evidence(rcy_record_id, case["org_id"])
+    inbound_fee = next(c for c in rcy["payload"]["charges"] if c["charge_type"] == "inbound_defect_fee")
+    assert inbound_fee["position"] == "CONTRADICTS"
+    assert len(inbound_fee["evidence_record_ids"]) == 1
