@@ -2,7 +2,7 @@
 
 ## Origin
 - **Round 2 Source Repository:** Prep Manager agent merged via PR #9 (`feature/prep-r3`)
-- **Owner / Contributor:** `@B-Sumani`
+- **Owner / Contributor:** `@jpatty-vin`
 - **Stage:** `prep`
 - **Agent ID:** `prep-manager@1.0.0`
 - **Implementation:** `real`

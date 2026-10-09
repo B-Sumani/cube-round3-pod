@@ -16,7 +16,7 @@ from tests.helpers import Boom, Fake
 def test_prep_is_configured_as_real_agent():
     manifest = load_manifest("prep")
     assert manifest["implementation"] == "real"
-    assert manifest["owner"] == "@B-Sumani"
+    assert manifest["owner"] == "@jpatty-vin"
     assert manifest["mode"] == "inproc"
     assert "stub" not in manifest["agent_id"]
 

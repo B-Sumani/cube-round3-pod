@@ -2,10 +2,11 @@
 # Shared areas belong to the whole Pod: list every member (or a team) so any of you can review them.
 # GitHub shows these owners as suggested reviewers. Enforcement needs branch protection (see GITHUB-GUIDE.md).
 /agents/receiving/    @Harish2300032959
-/agents/prep/         @prep-owner-handle
-/agents/pack/         @pack-owner-handle
-/agents/returns/      @returns-owner-handle
-/agents/recovery/     @recovery-owner-handle
-/orchestration/       @member1 @member2 @member3 @member4 @member5
-/shared/              @member1 @member2 @member3 @member4 @member5
-/tests/               @member1 @member2 @member3 @member4 @member5
+/agents/prep/         @jpatty-vin
+/agents/pack/         @B-Sumani
+/agents/returns/      @Vaishali-39
+/agents/recovery/     @hayth31
+/orchestration/       @Harish2300032959 @jpatty-vin @B-Sumani @Vaishali-39 @hayth31
+/shared/              @Harish2300032959 @jpatty-vin @B-Sumani @Vaishali-39 @hayth31
+/tests/               @Harish2300032959 @jpatty-vin @B-Sumani @Vaishali-39 @hayth31
+

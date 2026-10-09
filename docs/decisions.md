@@ -229,10 +229,10 @@ _Add entries below._
 - Consequences: Workflow state is always derived and fully traceable; never dependent on mutable agent state.
 
 ### D-123 · Integration of real Prep Agent into Pod pipeline
-- Date / Owner: 2026-10-10 / @B-Sumani & Pod Orchestration
+- Date / Owner: 2026-10-10 / @jpatty-vin & Pod Orchestration
 - Context: The real Prep agent from Round 2 (PR #9) has been merged into main and integrated into the orchestrator pipeline on `deploy-vercel`.
 - Decision:
-  - Switched `agents/prep/agent.json` from `organiser-stub` to `real` (`mode: "inproc"`, `owner: "@B-Sumani"`).
+  - Switched `agents/prep/agent.json` from `organiser-stub` to `real` (`mode: "inproc"`, `owner: "@jpatty-vin"`).
   - Ported deterministic rule engine (`agents/prep/engine.py`) and FastAPI handler (`agents/prep/app.py`). Added `agents/prep/PROVENANCE.md`.
   - Added adapter protection: defined missing `SYSTEM_PROMPT` fallback for Gemini, corrected sample_data multi-tenant signature check, set model provider name to `prep-r2-rules`.
   - Updated Recovery to consume real Prep evidence: when Prep evidence indicates compliance (`verdict == "PASS"`), Recovery refutes contradicted `inbound_defect_fee` and `prep_fee` charges (`CONTRADICTS`), recommending claims.

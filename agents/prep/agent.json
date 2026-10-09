@@ -1,7 +1,7 @@
 {
   "stage": "prep",
   "agent_id": "prep-manager@1.0.0",
-  "owner": "@B-Sumani",
+  "owner": "@jpatty-vin",
   "mode": "inproc",
   "url": "http://localhost:8102",
   "module": "agents.prep.app",
