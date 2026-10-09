@@ -180,6 +180,7 @@ def evaluate_pack_box(
     # CHECK 2: quantities_correct (Piece Count)
     # Home: Do the piece counts of ordered items match expected quantities?
     # =========================================================================
+    check_count: Optional[CheckResult] = None
     if not image_usable:
         check_count = CheckResult(
             result="UNCERTAIN",
@@ -234,7 +235,6 @@ def evaluate_pack_box(
                 confidence=avg_count_conf,
             )
         elif count_low_conf:
-            sku_name, conf = count_low_conf[0]
             check_count = CheckResult(
                 result="UNCERTAIN",
                 reason_code="LOW_COUNT_CONFIDENCE",
@@ -265,14 +265,8 @@ def evaluate_pack_box(
                 confidence=avg_count_conf,
             )
         elif present_count == 0 and len(expected_lines) > 0:
-            check_count = CheckResult(
-                result="PASS",
-                reason_code="DEFERRED_TO_PRESENCE_CHECK",
-                reason="Quantity check deferred: all items missing, evaluated under identity check",
-                expected=expected_lines,
-                observed=observed_counts,
-                confidence=None,
-            )
+            # Per EVIDENCE-CONTRACT.md line 93: non-applicable checks are omitted, not marked PASS
+            check_count = None
         else:
             check_count = CheckResult(
                 result="PASS",
@@ -395,7 +389,7 @@ def evaluate_pack_box(
                 confidence=check_identity.confidence,
             )
 
-        if check_count.result == "PASS":
+        if check_count is not None and check_count.result == "PASS":
             check_count = CheckResult(
                 result="UNCERTAIN",
                 reason_code="UNVERIFIED_UNDER_OCCLUSION" if occlusion_defect else "UNVERIFIED_UNDER_QUALITY_DEFECT",
@@ -421,13 +415,14 @@ def evaluate_pack_box(
     # Box Verdict Synthesis
     # Precedence: FAIL > UNCERTAIN > PASS
     # -------------------------------------------------------------------------
-    checks = {
+    checks: Dict[str, CheckResult] = {
         "items_present": check_identity,
-        "quantities_correct": check_count,
         "no_extra_items": check_extra,
     }
+    if check_count is not None:
+        checks["quantities_correct"] = check_count
 
-    all_results = [check_identity.result, check_count.result, check_extra.result]
+    all_results = [c.result for c in checks.values()]
 
     if "FAIL" in all_results:
         verdict = "STOP_AND_FIX"

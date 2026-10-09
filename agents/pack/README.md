@@ -1,9 +1,9 @@
 # agents/pack/ — Pack Manager Agent
 
-**Owner:** @B-Sumani  
-**Agent ID:** `pack-manager@1.0.0`  
-**Implementation:** `gemini-vision-deterministic-evaluator`  
-**Provenance:** Ported from Round 2 submission [`submissions/b-sumani/agent/`](PROVENANCE.md) (`efb6f138`).
+- **Owner:** @B-Sumani
+- **Agent ID:** `pack-manager@1.0.0`
+- **Implementation:** `gemini-vision-deterministic-evaluator`
+- **Provenance:** Ported from Round 2 submission [`submissions/b-sumani/agent/`](PROVENANCE.md) (`efb6f138`).
 
 ---
 

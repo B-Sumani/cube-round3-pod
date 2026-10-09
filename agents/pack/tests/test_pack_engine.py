@@ -202,4 +202,3 @@ def test_multi_image_earliest_mtime_chosen(tmp_path, monkeypatch):
     assert ev["payload"]["captured_at_source"] == "file_mtime"
     assert mock.call_count == 1
     assert len(mock.last_images) == 2
-

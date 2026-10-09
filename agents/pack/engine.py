@@ -150,9 +150,9 @@ def _extract_exif_datetime(image_bytes: bytes) -> Optional[datetime]:
     return None
 
 
-def _resolve_context_captured_at(request: dict) -> Optional[str]:
-    """Resolves valid ISO 8601 capture time from request context if present."""
-    ctx = request.get("context", {})
+def _resolve_context_captured_at(agent_input: dict) -> Optional[str]:
+    """Resolves valid ISO 8601 capture time from agent_input context if present."""
+    ctx = agent_input.get("context", {})
     candidates: List[Any] = []
     if isinstance(ctx, dict):
         if ctx.get("captured_at"):
@@ -160,8 +160,8 @@ def _resolve_context_captured_at(request: dict) -> Optional[str]:
         case_obj = ctx.get("case")
         if isinstance(case_obj, dict) and case_obj.get("captured_at"):
             candidates.append(case_obj["captured_at"])
-    if request.get("captured_at"):
-        candidates.append(request["captured_at"])
+    if agent_input.get("captured_at"):
+        candidates.append(agent_input["captured_at"])
 
     for cand in candidates:
         if isinstance(cand, str) and cand.strip():
@@ -176,18 +176,18 @@ def _resolve_context_captured_at(request: dict) -> Optional[str]:
 
 
 def _resolve_captured_at(
-    request: dict,
+    agent_input: dict,
     loaded_images: List[Dict[str, Any]],
     fallback_file_paths: Optional[List[Path]] = None,
 ) -> Tuple[str, str]:
     """Resolves (captured_at, captured_at_source) in strict order of priority:
 
-    a) capture time in request['context'] (e.g. context.case.captured_at or context.captured_at)
+    a) capture time in agent_input['context'] (e.g. context.case.captured_at or context.captured_at)
     b) image EXIF DateTimeOriginal (earliest among images)
     c) image file modified time (earliest among images)
     """
     # a) Context
-    ctx_dt = _resolve_context_captured_at(request)
+    ctx_dt = _resolve_context_captured_at(agent_input)
     if ctx_dt:
         return ctx_dt, "context"
 
@@ -226,9 +226,9 @@ def _resolve_captured_at(
     return now_dt.strftime("%Y-%m-%dT%H:%M:%SZ"), "file_mtime"
 
 
-def _resolve_order_lines(request: dict, subject_id: str, org_id: str) -> Optional[str]:
+def _resolve_order_lines(agent_input: dict, subject_id: str, org_id: str) -> Optional[str]:
     """Resolves order lines from context, document inputs, or sample data fallback."""
-    ctx = request.get("context", {})
+    ctx = agent_input.get("context", {})
     case_ctx = ctx.get("case", {})
     if isinstance(case_ctx, dict) and case_ctx.get("order_lines"):
         lines_val = case_ctx["order_lines"]
@@ -255,7 +255,7 @@ def _resolve_order_lines(request: dict, subject_id: str, org_id: str) -> Optiona
         return str(lines_val).strip()
 
     # Check for document in inputs
-    for inp in request.get("inputs", []):
+    for inp in agent_input.get("inputs", []):
         if inp.get("kind") in ("document", "csv_row", "other") and "order" in inp.get("ref", "").lower():
             p = _resolve_input_dir() / inp["ref"]
             if p.is_file():
@@ -269,13 +269,13 @@ def _resolve_order_lines(request: dict, subject_id: str, org_id: str) -> Optiona
 
 
 def run_pack_pipeline(
-    request: dict,
+    agent_input: dict,
     config: Optional[PackConfig] = None,
     adapter: Optional[VisionModelAdapter] = None,
 ) -> dict:
     """Main execution pipeline for an Agent Input."""
     cfg = config or DEFAULT_CONFIG
-    s = request["subject"]
+    s = agent_input["subject"]
     org_id = s.get("org_id", "")
     subject_id = s.get("subject_id") or s.get("unit_id", "")
 
@@ -295,10 +295,10 @@ def run_pack_pipeline(
 
     # 2. Upstream evidence handling (Receiving only)
     receiving_records = [
-        r for r in request.get("previous_evidence", []) if r.get("stage") == "receiving"
+        r for r in agent_input.get("previous_evidence", []) if r.get("stage") == "receiving"
     ]
     upstream_refs = [r["record_id"] for r in receiving_records]
-    upstream_verdicts = {r["record_id"]: effective_verdict(request, r) for r in receiving_records}
+    upstream_verdicts = {r["record_id"]: effective_verdict(agent_input, r) for r in receiving_records}
 
     # 3. Deterministic record_id & metadata
     clean_sub = re.sub(r"[^A-Za-z0-9._-]", "-", subject_id)
@@ -315,17 +315,17 @@ def run_pack_pipeline(
         channel = "mfn"
 
     # 4. Resolve Order Lines
-    order_lines = _resolve_order_lines(request, subject_id, org_id)
+    order_lines = _resolve_order_lines(agent_input, subject_id, org_id)
     order_skus = list(parse_order_lines(order_lines).keys()) if order_lines else []
     candidate_skus = build_candidate_skus(org_id, order_skus)
 
     # 5. Determine inputs and execution path
     image_inputs = [
-        inp for inp in request.get("inputs", [])
+        inp for inp in agent_input.get("inputs", [])
         if inp.get("kind") == "image" or str(inp.get("ref", "")).lower().endswith((".jpg", ".jpeg", ".png"))
     ]
 
-    # Path A: Real image inputs provided in request["inputs"]
+    # Path A: Real image inputs provided in agent_input["inputs"]
     if image_inputs:
         input_dir = _resolve_input_dir()
 
@@ -337,7 +337,7 @@ def run_pack_pipeline(
 
         # Initial resolution of captured_at across existing image files or context
         captured_at, captured_at_source = _resolve_captured_at(
-            request, [], fallback_file_paths=safe_paths
+            agent_input, [], fallback_file_paths=safe_paths
         )
 
         loaded_images: List[Dict[str, Any]] = []
@@ -352,7 +352,7 @@ def run_pack_pipeline(
                     "no_extra_items": CheckResult("UNCERTAIN", "FILE_NOT_FOUND", f"Image file missing on disk: {ref}"),
                 }
                 return _build_response_record(
-                    request=request, record_id=record_id, captured_at=captured_at, operator_id=operator_id,
+                    agent_input=agent_input, record_id=record_id, captured_at=captured_at, operator_id=operator_id,
                     order_id=order_id, channel=channel, order_lines=order_lines or "", candidate_skus=candidate_skus,
                     checks=checks, verdict="UNCERTAIN", operator_action="STOP", upstream_refs=upstream_refs,
                     upstream_verdicts=upstream_verdicts, model_info={"name": "filesystem", "version": "1.0", "calls": 0},
@@ -374,7 +374,7 @@ def run_pack_pipeline(
                     "no_extra_items": CheckResult("UNCERTAIN", "FILE_NOT_FOUND", f"Image file unreadable on disk: {ref}"),
                 }
                 return _build_response_record(
-                    request=request, record_id=record_id, captured_at=captured_at, operator_id=operator_id,
+                    agent_input=agent_input, record_id=record_id, captured_at=captured_at, operator_id=operator_id,
                     order_id=order_id, channel=channel, order_lines=order_lines or "", candidate_skus=candidate_skus,
                     checks=checks, verdict="UNCERTAIN", operator_action="STOP", upstream_refs=upstream_refs,
                     upstream_verdicts=upstream_verdicts, model_info={"name": "filesystem", "version": "1.0", "calls": 0},
@@ -396,7 +396,7 @@ def run_pack_pipeline(
                     "no_extra_items": CheckResult("UNCERTAIN", "SHA256_MISMATCH", f"Image SHA-256 mismatch for ref: {ref}"),
                 }
                 return _build_response_record(
-                    request=request, record_id=record_id, captured_at=captured_at, operator_id=operator_id,
+                    agent_input=agent_input, record_id=record_id, captured_at=captured_at, operator_id=operator_id,
                     order_id=order_id, channel=channel, order_lines=order_lines or "", candidate_skus=candidate_skus,
                     checks=checks, verdict="UNCERTAIN", operator_action="STOP", upstream_refs=upstream_refs,
                     upstream_verdicts=upstream_verdicts, model_info={"name": "integrity_check", "version": "1.0", "calls": 0},
@@ -417,7 +417,7 @@ def run_pack_pipeline(
 
         # Re-resolve captured_at with all successfully loaded images (evaluates EXIF on all images)
         captured_at, captured_at_source = _resolve_captured_at(
-            request, loaded_images, fallback_file_paths=safe_paths
+            agent_input, loaded_images, fallback_file_paths=safe_paths
         )
 
         # Missing order lines check
@@ -428,7 +428,7 @@ def run_pack_pipeline(
                 "no_extra_items": CheckResult("UNCERTAIN", "ORDER_LINES_MISSING", "Order lines not provided in context or case"),
             }
             return _build_response_record(
-                request=request, record_id=record_id, captured_at=captured_at, operator_id=operator_id,
+                agent_input=agent_input, record_id=record_id, captured_at=captured_at, operator_id=operator_id,
                 order_id=order_id, channel=channel, order_lines="", candidate_skus=candidate_skus,
                 checks=checks, verdict="UNCERTAIN", operator_action="STOP", upstream_refs=upstream_refs,
                 upstream_verdicts=upstream_verdicts, model_info={"name": "order_check", "version": "1.0", "calls": 0},
@@ -449,7 +449,7 @@ def run_pack_pipeline(
             )
         except (ModelProviderError, ModelTimeoutError, ModelParsingError, ModelError) as err:
             return pending_output(
-                request,
+                agent_input,
                 code="model_error",
                 message=str(err),
                 retryable=False,
@@ -464,7 +464,7 @@ def run_pack_pipeline(
         )
 
         return _build_response_record(
-            request=request, record_id=record_id, captured_at=captured_at, operator_id=operator_id,
+            agent_input=agent_input, record_id=record_id, captured_at=captured_at, operator_id=operator_id,
             order_id=order_id, channel=channel, order_lines=order_lines, candidate_skus=candidate_skus,
             checks=checks_dict, verdict=verdict, operator_action=operator_action, upstream_refs=upstream_refs,
             upstream_verdicts=upstream_verdicts, model_info=model_info, source="vision_pipeline",
@@ -509,7 +509,7 @@ def run_pack_pipeline(
         }
 
         return _build_response_record(
-            request=request, record_id=record_id, captured_at=sample_row["captured_at"], operator_id=operator_id,
+            agent_input=agent_input, record_id=record_id, captured_at=sample_row["captured_at"], operator_id=operator_id,
             order_id=order_id, channel=channel, order_lines=r["order_lines"], candidate_skus=candidate_skus,
             checks=checks_dict, verdict=verdict, operator_action=operator_action, upstream_refs=upstream_refs,
             upstream_verdicts=upstream_verdicts, model_info=model_info, source="sample_replay",
@@ -518,14 +518,14 @@ def run_pack_pipeline(
         )
 
     # Path C: No inputs and not in sample data -> UNCERTAIN (insufficient_evidence)
-    captured_at, captured_at_source = _resolve_captured_at(request, [])
+    captured_at, captured_at_source = _resolve_captured_at(agent_input, [])
     checks = {
         "items_present": CheckResult("UNCERTAIN", "INSUFFICIENT_EVIDENCE", "No carton photo provided in inputs"),
         "quantities_correct": CheckResult("UNCERTAIN", "INSUFFICIENT_EVIDENCE", "No carton photo provided in inputs"),
         "no_extra_items": CheckResult("UNCERTAIN", "INSUFFICIENT_EVIDENCE", "No carton photo provided in inputs"),
     }
     return _build_response_record(
-        request=request, record_id=record_id, captured_at=captured_at, operator_id=operator_id,
+        agent_input=agent_input, record_id=record_id, captured_at=captured_at, operator_id=operator_id,
         order_id=order_id, channel=channel, order_lines=order_lines or "", candidate_skus=candidate_skus,
         checks=checks, verdict="UNCERTAIN", operator_action="STOP", upstream_refs=upstream_refs,
         upstream_verdicts=upstream_verdicts, model_info={"name": "none", "version": "0", "calls": 0},
@@ -536,7 +536,7 @@ def run_pack_pipeline(
 
 def _build_response_record(
     *,
-    request: dict,
+    agent_input: dict,
     record_id: str,
     captured_at: str,
     operator_id: str,
@@ -600,7 +600,7 @@ def _build_response_record(
     }
 
     record = build_record(
-        request,
+        agent_input,
         agent_id=AGENT_ID,
         record_id=record_id,
         captured_at=captured_at,
@@ -611,7 +611,7 @@ def _build_response_record(
         outcome=contract_outcome,
         model=model_info,
         reason=f"Pack verification verdict: {contract_outcome} ({contract_verdict})",
-        inputs=request.get("inputs", []),
+        inputs=agent_input.get("inputs", []),
         upstream_refs=upstream_refs,
         payload=payload,
         latency_ms=latency_ms,

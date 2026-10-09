@@ -15,6 +15,18 @@ import pytest
 from agents.pack.engine import run_pack_pipeline
 from agents.pack.model_adapter import MockVisionAdapter
 from agents.pack.parser import ModelObservation, ObservedItem, UnrecognisedItem, ImageQuality
+from agents.pack.tests.test_pack_contract_suite import (
+    test_pack_contract,
+    test_pack_fail,
+    test_pack_hash,
+    test_pack_invalid_agent_input_rejected,
+    test_pack_model_failure,
+    test_pack_pass,
+    test_pack_previous_evidence,
+    test_pack_quantities_correct_omitted_when_no_items_present,
+    test_pack_uncertain,
+    test_pack_wrong_tenant,
+)
 from orchestration.clients import AgentRejected, client_for
 from shared.utils.hashing import verify
 from shared.utils.schema import errors
@@ -43,9 +55,12 @@ def test_pack_mfn_cases_are_contract_valid(cases):
         assert out["agent_id"] == "pack-manager@1.0.0"
         assert PCK_ID_REGEX.match(ev["record_id"]), f"Invalid record_id: {ev['record_id']}"
 
-        # Standard check keys must be present
+        # Standard check keys: items_present and no_extra_items are always present;
+        # quantities_correct applies only when at least one expected item is present
+        # (non-applicable checks are omitted per EVIDENCE-CONTRACT.md line 93).
         check_keys = {c["check_key"] for c in ev["checks"]}
-        assert check_keys == {"items_present", "quantities_correct", "no_extra_items"}
+        assert {"items_present", "no_extra_items"}.issubset(check_keys)
+        assert check_keys.issubset({"items_present", "quantities_correct", "no_extra_items"})
 
         # Verdict consistency
         assert out["verdict"] == ev["decision"]["verdict"]
@@ -82,46 +97,46 @@ def test_pack_deterministic_record_id_and_content_hash(cases):
     assert verify(res2["evidence"])
 
 
-def test_pack_upstream_refs_only_includes_receiving():
+def test_pack_upstream_refs_only_includes_receiving(cases):
     """Pack manager must include only Receiving record IDs in upstream_refs and honor overrides."""
-    req = {
-        "schema_version": "1.0",
-        "request_id": "WF-test:pack",
-        "workflow_id": "WF-test",
-        "stage": "pack",
-        "subject": {"org_id": "org_demo_alpha", "subject_id": "UNIT-0005", "route": "mfn"},
-        "inputs": [],
-        "previous_evidence": [
-            {
-                "stage": "receiving",
-                "record_id": "RCV-UNIT-0005",
-                "decision": {"verdict": "PASS"},
-            },
-            {
-                "stage": "prep",
-                "record_id": "PRP-UNIT-0005",
-                "decision": {"verdict": "PASS"},
-            },
-        ],
-        "context": {
-            "overrides": [
-                {
-                    "override_id": "OVR-01",
-                    "supersedes": {"record_id": "RCV-UNIT-0005", "override_id": None},
-                    "target": "decision",
-                    "new_verdict": "FAIL",
-                }
-            ]
-        },
-    }
+    from shared.utils.records import build_record
+
+    case = next(c for c in cases if applies("pack", c))
+    rcv_ev = client_for("receiving").run(make_input("receiving", case), 30)["evidence"]
+    prep_input = make_input("prep", case, [rcv_ev])
+    prep_ev = build_record(
+        prep_input,
+        agent_id="prep-stub@0",
+        record_id=f"PRP-{case['unit_id']}",
+        captured_at=rcv_ev["captured_at"],
+        checks=[],
+        outcome="compliant",
+        reason="prep complete",
+        model={"name": "none", "version": "0", "calls": 0},
+        verdict="PASS",
+    )
+    overrides = [
+        {
+            "override_id": "OVR-01",
+            "supersedes": {"record_id": rcv_ev["record_id"], "override_id": None},
+            "target": "decision",
+            "new_verdict": "FAIL",
+            "actor": "operator",
+            "at": "2026-06-25T12:00:00Z",
+            "reason": "manual inspection",
+            "original_verdict": "PASS",
+            "previous_verdict": "PASS",
+        }
+    ]
+    req = make_input("pack", case, previous=[rcv_ev, prep_ev], overrides=overrides)
 
     out = client_for("pack").run(req, 30)
     ev = out["evidence"]
 
     # upstream_refs should strictly contain only the receiving record
-    assert ev["upstream_refs"] == ["RCV-UNIT-0005"]
+    assert ev["upstream_refs"] == [rcv_ev["record_id"]]
     # upstream_verdicts in payload must reflect the overridden verdict
-    assert ev["payload"]["upstream_verdicts"]["RCV-UNIT-0005"] == "FAIL"
+    assert ev["payload"]["upstream_verdicts"][rcv_ev["record_id"]] == "FAIL"
 
 
 def test_pack_vision_pipeline_matching_items(tmp_path, monkeypatch):
@@ -276,6 +291,7 @@ def test_pack_directory_traversal_ref():
         "stage": "pack",
         "subject": {"org_id": "org_demo_alpha", "subject_id": "UNIT-CUSTOM-6"},
         "inputs": [{"kind": "image", "ref": "../../etc/passwd.jpg", "sha256": "0" * 64}],
+        "previous_evidence": [],
         "context": {"order_lines": [{"sku": "SKU-001", "quantity": 1}]},
     }
     # When executed through orchestrator client, LookupError translates to AgentRejected
@@ -575,4 +591,3 @@ def test_non_sample_same_request_twice_gives_same_record_id_and_content_hash(tmp
     assert out1["evidence"]["content_hash"] == out2["evidence"]["content_hash"]
     assert verify(out1["evidence"])
     assert verify(out2["evidence"])
-
