@@ -170,3 +170,75 @@ _Add entries below._
 - Why not B: it changes the protocol for every agent. Why not only C: it would lose the useful retry for agents that can support it.
 - **Honest limits:** in memory, per process. Not durable across restarts, not shared across uvicorn workers or replicas, and gone after the TTL. Run agents that rely on it with one worker, or switch it off (`AGENT_IDEMPOTENCY=off`, which also stops advertising it). `/health` reports `"scope": "process", "durable": false`.
 - Compatibility: the request and response schemas are unchanged. `/health` gains an optional `idempotency` field; old agents without it simply stop getting retries after *ambiguous* failures (a behaviour change, safer than a duplicate model call). New status codes `409` and `503` come only from agents that opt in. Non-Python agents: see `shared/contracts/agent-api.md#idempotency-optional-capability`.
+
+### D-118 · Supplier shortfall is separated from channel loss (F-10)
+- Date / Owner: 2026-10-10 / Pod (orchestration)
+- Context: Inbound intake discrepancies in Receiving (e.g. 24 units received vs 30 ordered on PO) occur before carrier handover to Amazon FBA or 3PL. Disputing this as a channel `lost_inbound` fee is rejected by Amazon because carrier proof-of-delivery does not substantiate channel loss.
+- Options considered:
+  A) Let Recovery infer channel loss from receiving shortages and claim `lost_inbound`.
+  B) Disallow channel claims for supplier shortages by tagging `payload.shortfall_side = "supplier"` in Receiving and having Recovery maintain position `SILENT`.
+  C) Treat any shortage as an immediate workflow halt.
+- Decision: B. Receiving labels supplier discrepancies with `shortfall_side = "supplier"`. Recovery strictly treats `lost_inbound` charges as `SILENT` unless independent carrier/shipping evidence proves carrier or fulfillment center fault.
+- Why: Amazon FBA requires BOL/carrier proof of delivery to honor lost inbound claims. Supplier shortages belong in PO vendor debit memos, not Amazon channel disputes.
+- Consequences: Merchants do not waste dispute quotas on false channel claims; supplier disputes remain tracked under `payload.shortfall_side` in Receiving evidence.
+
+### D-119 · Evidence confidence, quality, and incomplete stage handling
+- Date / Owner: 2026-10-10 / Pod (orchestration)
+- Context: How low-confidence vision predictions, ungradable attributes, or missing stages affect final commerce outcomes.
+- Options considered:
+  A) Fallback to heuristic defaults (e.g. assume PASS if image is blurry).
+  B) Preserve UNCERTAIN verbatim, escalate with `needs_human: true`, and guard provisional state.
+- Decision: B. When evidence confidence is insufficient or checks cannot be definitively evaluated, the stage returns `verdict: "UNCERTAIN"` with an explicit `uncertain_reason`. Any claim or exception resting on an uncertain or incomplete stage forces `needs_human: true`. Furthermore:
+  - If a required stage is incomplete or errored, status is `FAILED` or `INCOMPLETE`, and `final_outcome.provisional` is strictly `true`.
+  - Every final outcome must cite non-empty `contributing_records`.
+- Why: Automation must never invent confidence. Wrongful stock rejection or unwarranted fee claims carry financial liability.
+- Consequences: Workflows with low-visibility images or missing data pause in `NEEDS_REVIEW` or `INCOMPLETE` for operator review rather than producing silent failures.
+
+### D-120 · Orchestration flow policy: fail-open continuation by default
+- Date / Owner: 2026-10-10 / Pod (orchestration)
+- Context: Deciding default values for `on_uncertain`, `on_error`, `retries`, and `timeout_s` in `flow.json`.
+- Options considered:
+  A) Halt-on-first-failure (`on_error: block`, `on_uncertain: block`).
+  B) Continue-by-default (`on_error: continue`, `on_uncertain: continue`).
+- Decision: B (`continue` defaults), with `retries: 1` (transient errors only) and `timeout_s: 30`. Halting is opt-in via specialist flows or explicit `block` policy when `needs_human: true`.
+- Why: In e-commerce workflows, collecting all possible evidence across downstream stages (e.g. Returns inspection, Recovery fee auditing) creates a complete forensic dossier even if an upstream stage encountered an issue.
+- Consequences: Downstream stages run and record evidence; the overall workflow outcome reflects the aggregate state (`EXCEPTION` or `INCOMPLETE`), never masking the failure.
+
+### D-121 · Pack `stop_and_fix` disposition halts shipment and requires human review
+- Date / Owner: 2026-10-10 / Pod (orchestration + pack)
+- Context: The Pack agent evaluates packaging integrity, barcode readability, hazmat labeling, and box selection for MFN shipments. When a critical check fails (e.g. barcode unreadable, unsealed liquids), Pack returns `verdict: "FAIL"` with `disposition: "stop_and_fix"`.
+- Options considered:
+  A) Automatically repackage or re-assign box size without human review.
+  B) Halt physical packing, mark workflow `EXCEPTION` with `needs_human: true`, and hold shipment until a human operator overrides.
+- Decision: B. The package is held on the packing line. The workflow marks the stage as failed and triggers `needs_human: true`. An operator manually corrects the packing issue and posts an override with actor ID and reason via the UI or API before shipment dispatch.
+- Why: Shipping non-compliant parcels risks carrier fines, customer damage, or channel delisting.
+- Consequences: Guarantees zero unverified packages leave the warehouse; requires operational attention via the review queue.
+
+### D-122 · Final outcome precedence and provisionality derivation
+- Date / Owner: 2026-10-10 / Pod (orchestration)
+- Context: Multiple stages produce different verdicts (e.g. Receiving PASS, Pack FAIL, Recovery CLAIM_RECOMMENDED). The system must deterministically roll up evidence into one final outcome.
+- Decision: Strict pure-function precedence in `orchestration/rollup.py`:
+  `CLAIM_RECOMMENDED > EXCEPTION > INCOMPLETE > NEEDS_REVIEW > CLEAN`.
+  - `CLAIM_RECOMMENDED`: Recovery identified valid contradictive evidence against unjustified channel fees (`claimable_usd > 0`).
+  - `EXCEPTION`: Any stage has effective verdict `FAIL` (e.g. carton damaged, wrong SKU, packing defect).
+  - `INCOMPLETE`: Any required stage did not complete (agent error, timeout, rejected).
+  - `NEEDS_REVIEW`: Any stage has effective verdict `UNCERTAIN` requiring human intervention.
+  - `CLEAN`: All required stages completed with effective verdict `PASS`.
+  Provisionality: `final_outcome.provisional = (status != "COMPLETED")`.
+- Why: Commercial priority requires surfacing recoverable revenue and physical defects before marking clean. Pure functions guarantee reproducibility.
+- Consequences: Workflow state is always derived and fully traceable; never dependent on mutable agent state.
+
+### D-123 · Prep agent stubbing isolation and procedure to swap in real Prep
+- Date / Owner: 2026-10-10 / Pod (orchestration)
+- Context: Prep is not yet merged/integrated in Round 3. We must preserve complete workflow routing for FBA units without faking or fabricating Prep decisions.
+- Decision: Keep `agents/prep/` strictly as an `organiser-stub` (`implementation: "organiser-stub"` in `agent.json`). Every output includes `[STUB REPLAY]` in checks and detail. Recovery treats missing or stub Prep evidence as `SILENT` for inbound defect and prep fees.
+- How to swap in the real Prep agent:
+  1. Place the Round 2 Prep agent files into `agents/prep/` (or run it as an external HTTP microservice).
+  2. In `agents/prep/agent.json`:
+     - Change `"implementation"` from `"organiser-stub"` to `"real"`.
+     - Update `"owner"` with the Prep owner's GitHub handle.
+     - Set `"mode"`: `"inproc"` (with `handle` in `agents/prep/app.py`) or `"http"` (with endpoint URL).
+  3. Verify output matches `shared/schemas/agent-output.json` with valid `content_hash` and checks (`polybag_check`, `barcode_scannable`, `fragile_bubble_wrap`, etc.).
+  4. Run `pytest tests/integration/test_prep_handling.py` and `pytest tests/e2e/`.
+- Why: Absolute transparency. An organiser stub must never be disguised as a real autonomous agent.
+- Consequences: Prep swap-in is a clean, isolated 1-line change in `agent.json`.
