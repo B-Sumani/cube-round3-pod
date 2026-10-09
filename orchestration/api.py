@@ -17,6 +17,7 @@ import os
 import re
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from shared.utils import sample_data
@@ -26,6 +27,13 @@ from .orchestrator import apply_override, bundle, default_flow_path, flow_stages
 from .store import EvidenceConflict, FileStore, TenantViolation, WorkflowBusy
 
 app = FastAPI(title="CUBE Round 3 orchestrator")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.exception_handler(WorkflowBusy)
