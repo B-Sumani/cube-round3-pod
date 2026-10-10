@@ -240,3 +240,32 @@ _Add entries below._
 - Why: Full end-to-end integration of all 5 autonomous domain agents (Receiving, Prep, Pack, Returns, Recovery) matching contract and pod requirements.
 - Consequences: All 5 agents are now real autonomous implementations. Zero stubs remain in the active pipeline.
 
+### D-124 · Pack dev dataset wiring, product catalogue scoping, and ad-hoc image upload architecture
+- Date / Owner: 2026-10-10 / Pod (orchestration + pack)
+- Context:
+  - Round 2 Pack dev dataset (`agents/pack/data/dev/input.csv`, `images/`, `catalogue.csv`) was merged into main. The unit IDs overlap with organiser sample unit IDs (UNIT-0010, UNIT-0012, etc.).
+  - Pack Manager UI required a product catalogue viewer and order line builder to verify cartons against order lines.
+  - Reviewers need to test physical vision agents (Pack first, Receiving, Prep, Returns) by uploading custom carton photos without modifying existing repo sample files.
+  - Vercel serverless deployment enforces read-only filesystem except `/tmp` and request body size limit of ~4.5 MB.
+- Decision:
+  1. **Dual Dataset Resolution with Tenancy Fallback**:
+     - `agents/pack/engine.py` checks `(org_id, unit_id)` against `agents/pack/data/dev/input.csv` and auto-resolves images in `agents/pack/data/dev/images/`.
+     - If not in dev data for that org, falls back to organiser sample data (`pack_sample.csv`).
+     - Tenancy checks match on both `org_id` and `unit_id`, preventing cross-tenant leakage between overlapping unit IDs.
+     - Preserves existing 100 sample workflows and test suites completely unchanged.
+     - Runtime agents NEVER read from `agents/pack/eval/`. Eval truth comparison is encapsulated in standalone `agents/pack/eval/run_eval.py`.
+  2. **Tenant-Scoped Product Catalogue Endpoint**:
+     - `GET /api/catalogue` (and `/catalogue`) returns catalogue rows (SKU, title, description, expected packaging, barcode, hazmat) scoped by `X-Org-Id`.
+     - In Pack Manager UI, added searchable catalogue table and order builder to select SKUs and quantities (`[-] qty [+]`), rendering the manifest alongside Pack inspection results.
+  3. **Ad-Hoc Content-Addressed Image Upload & Ephemeral Storage**:
+     - Client-side: Canvas downscaling and progressive compression to < 3 MB before sending over HTTP. Reject files that cannot be compressed under 3 MB.
+     - Server endpoint `POST /api/stages/{stage}/run-upload`:
+       - Enforces file type (.jpg, .jpeg, .png, .webp) and max size (4.5 MB).
+       - Enforces tenant isolation (refuses cross-tenant unit requests with 404).
+       - Content-addresses uploaded files via SHA-256 and writes to `/tmp/cube_uploads/<sha256>.<ext>`.
+       - Passes `inputs=[{"ref": "uploads/<sha256>.<ext>", "kind": "image", "sha256": sha256}]` to the orchestrator client.
+       - The Evidence Record captures the SHA-256 hash and ref; raw image bytes are NEVER stored in the evidence record.
+       - Marks `payload.ad_hoc_upload: true` and `context.ad_hoc_upload: true`.
+       - If no vision API key is set, returns honest UNCERTAIN (`pending_output`) rather than failing silently or faking predictions.
+       - UI displays the result with an explicit notice that images reside in ephemeral storage and will disappear on container restart.
+
