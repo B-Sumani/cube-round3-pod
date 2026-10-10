@@ -109,6 +109,21 @@ def get_org_catalogue(org_id: str) -> Dict[str, Dict[str, str]]:
     raise LookupError(f"No catalogue or authorization for organisation: {org_id}")
 
 
+DEV_CATALOGUE_PATH = PACKAGE_DIR / "data" / "catalogue.csv"
+
+
+def get_dev_catalogue(org_id: str) -> Dict[str, Dict[str, str]]:
+    """Returns the product catalogue from agents/pack/data/catalogue.csv for authorized tenants."""
+    if not org_id or not isinstance(org_id, str):
+        raise LookupError("Missing or invalid org_id")
+    # Tenancy check: only authorized demo orgs or registered tenants
+    if org_id not in ("org_demo_alpha", "org_demo_bravo") and org_id not in _RUNTIME_CATALOGUES:
+        raise LookupError(f"No catalogue or authorization for organisation: {org_id}")
+    if DEV_CATALOGUE_PATH.is_file():
+        return _load_catalogue_csv(DEV_CATALOGUE_PATH)
+    return get_org_catalogue(org_id)
+
+
 def _load_catalogue_csv(path: Path) -> Dict[str, Dict[str, str]]:
     out: Dict[str, Dict[str, str]] = {}
     with open(path, newline="", encoding="utf-8") as f:
@@ -121,6 +136,15 @@ def _load_catalogue_csv(path: Path) -> Dict[str, Dict[str, str]]:
                     "description": (row.get("description") or "").strip(),
                 }
     return out
+
+
+def build_candidate_skus_from_catalogue(
+    catalogue: Dict[str, Dict[str, str]], order_skus: List[str]
+) -> List[str]:
+    """Builds unique candidate SKUs from an explicit catalogue dict and order SKUs."""
+    candidates = set(catalogue.keys())
+    candidates.update(s.strip() for s in order_skus if s.strip())
+    return sorted(candidates)
 
 
 def build_candidate_skus(org_id: str, order_skus: List[str]) -> List[str]:

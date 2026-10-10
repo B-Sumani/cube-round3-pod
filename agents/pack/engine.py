@@ -16,7 +16,9 @@ Implements Round 3 contract rules:
 """
 from __future__ import annotations
 
+import csv
 from datetime import datetime, timezone
+from functools import lru_cache
 import hashlib
 import os
 from pathlib import Path
@@ -29,7 +31,12 @@ from shared.utils.hashing import seal
 from shared.utils.records import build_output, build_record, check as make_check, pending_output
 from shared.utils.stubs import effective_verdict, photos
 
-from agents.pack.catalogue import build_candidate_skus, get_org_catalogue
+from agents.pack.catalogue import (
+    build_candidate_skus,
+    build_candidate_skus_from_catalogue,
+    get_dev_catalogue,
+    get_org_catalogue,
+)
 from agents.pack.config import DEFAULT_CONFIG, PackConfig
 from agents.pack.evaluator import CheckResult, evaluate_pack_box, parse_order_lines
 from agents.pack.mapping import map_outcome, map_uncertain_reason, map_verdict, to_contract_check
@@ -72,16 +79,52 @@ def _resolve_input_dir() -> Path:
     return (ROOT_DIR / "data" / "input").resolve()
 
 
+DEV_DATA_DIR = Path(__file__).resolve().parent / "data"
+DEV_INPUT_CSV = DEV_DATA_DIR / "dev" / "input.csv"
+DEV_IMAGES_DIR = DEV_DATA_DIR / "dev" / "images"
+
+
+@lru_cache(maxsize=1)
+def _load_dev_rows() -> Dict[Tuple[str, str], Dict[str, str]]:
+    if not DEV_INPUT_CSV.is_file():
+        return {}
+    out: Dict[Tuple[str, str], Dict[str, str]] = {}
+    with open(DEV_INPUT_CSV, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            org = (row.get("org_id") or "").strip()
+            unit = (row.get("unit_id") or "").strip()
+            if org and unit:
+                out[(org, unit)] = row
+    return out
+
+
+def get_dev_row(org_id: str, unit_id: str) -> Optional[Dict[str, str]]:
+    return _load_dev_rows().get((org_id, unit_id))
+
+
+def is_dev_unit_under_other_org(org_id: str, unit_id: str) -> bool:
+    dev_rows = _load_dev_rows()
+    return any(u == unit_id and o != org_id for (o, u) in dev_rows.keys())
+
+
 def _validate_safe_path(ref: str, input_dir: Path) -> Path:
-    """Ensures input ref does not escape input_dir."""
+    """Ensures input ref does not escape input_dir or ROOT_DIR."""
     if ref.startswith("/") or ref.startswith("\\") or ":" in ref:
         raise LookupError(f"Absolute paths forbidden in ref: {ref}")
+    if ref.startswith("agents/pack/data/"):
+        target = (ROOT_DIR / ref).resolve()
+        try:
+            target.relative_to(ROOT_DIR)
+            return target
+        except ValueError as exc:
+            raise LookupError(f"Path traversal detected in ref: {ref}") from exc
     target = (input_dir / ref).resolve()
     try:
         target.relative_to(input_dir)
+        return target
     except ValueError as exc:
         raise LookupError(f"Path traversal detected in ref: {ref}") from exc
-    return target
 
 
 def _extract_exif_datetime(image_bytes: bytes) -> Optional[datetime]:
@@ -261,6 +304,11 @@ def _resolve_order_lines(agent_input: dict, subject_id: str, org_id: str) -> Opt
             if p.is_file():
                 return p.read_text(encoding="utf-8").strip()
 
+    # Dev data lookup
+    dev_row = get_dev_row(org_id, subject_id)
+    if dev_row and dev_row.get("order_lines"):
+        return dev_row["order_lines"].strip()
+
     # Fallback to sample data if unit exists in pack_sample.csv
     if sample_data.has("pack", subject_id, org_id):
         return sample_data.row("pack", subject_id, org_id).get("order_lines", "").strip()
@@ -286,12 +334,16 @@ def run_pack_pipeline(
     except LookupError as exc:
         raise LookupError(f"Tenancy rejection: {exc}") from exc
 
-    # If subject exists only under another org in sample data, reject cross-tenant
+    # Tenancy check: verify unit belongs to this org in dev data or sample data
     other_orgs = {"org_demo_alpha", "org_demo_bravo"} - {org_id}
-    if not sample_data.has("pack", subject_id, org_id) and any(
-        sample_data.has("pack", subject_id, other) for other in other_orgs
-    ):
-        raise LookupError(f"Tenancy violation: {subject_id} does not belong to {org_id}")
+    has_dev = get_dev_row(org_id, subject_id) is not None
+    has_sample = sample_data.has("pack", subject_id, org_id)
+
+    if not has_dev and not has_sample:
+        if is_dev_unit_under_other_org(org_id, subject_id) or any(
+            sample_data.has("pack", subject_id, other) for other in other_orgs
+        ):
+            raise LookupError(f"Tenancy violation: {subject_id} does not belong to {org_id}")
 
     # 2. Upstream evidence handling (Receiving only)
     receiving_records = [
@@ -302,22 +354,51 @@ def run_pack_pipeline(
 
     # 3. Deterministic record_id & metadata
     clean_sub = re.sub(r"[^A-Za-z0-9._-]", "-", subject_id)
-    if sample_data.has("pack", subject_id, org_id):
+    dev_row = get_dev_row(org_id, subject_id)
+
+    # Check if request has explicit image inputs
+    has_image_inputs = any(
+        inp.get("kind") == "image" or str(inp.get("ref", "")).lower().endswith((".jpg", ".jpeg", ".png"))
+        for inp in agent_input.get("inputs", [])
+    )
+
+    # Determine if this is an organiser sample replay:
+    # A unit in sample data replays organiser sample data when:
+    # - No image inputs are provided in request
+    # - AND request is not explicitly marked with dev channel "amazon_mfn"
+    is_sample_replay = (
+        sample_data.has("pack", subject_id, org_id)
+        and not has_image_inputs
+        and agent_input.get("context", {}).get("case", {}).get("channel") != "amazon_mfn"
+        and agent_input.get("context", {}).get("channel") != "amazon_mfn"
+    )
+
+    if is_sample_replay:
         sample_row = sample_data.row("pack", subject_id, org_id)
         record_id = sample_row["record_id"]
         operator_id = sample_row["operator_id"]
         order_id = sample_row["order_id"]
         channel = sample_row.get("channel", "mfn")
+    elif dev_row is not None:
+        record_id = f"PCK-{clean_sub}"
+        operator_id = "op_pack_system"
+        order_id = dev_row.get("order_id", f"ORD-{clean_sub}")
+        channel = dev_row.get("channel", "mfn")
     else:
         record_id = f"PCK-{clean_sub}"
         operator_id = "op_pack_system"
         order_id = f"ORD-{clean_sub}"
         channel = "mfn"
 
-    # 4. Resolve Order Lines
+    # 4. Resolve Order Lines and Candidate SKUs
     order_lines = _resolve_order_lines(agent_input, subject_id, org_id)
     order_skus = list(parse_order_lines(order_lines).keys()) if order_lines else []
-    candidate_skus = build_candidate_skus(org_id, order_skus)
+    dev_catalogue = None
+    if dev_row is not None:
+        dev_catalogue = get_dev_catalogue(org_id)
+        candidate_skus = build_candidate_skus_from_catalogue(dev_catalogue, order_skus)
+    else:
+        candidate_skus = build_candidate_skus(org_id, order_skus)
 
     # 5. Determine inputs and execution path
     image_inputs = [
@@ -325,11 +406,27 @@ def run_pack_pipeline(
         if inp.get("kind") == "image" or str(inp.get("ref", "")).lower().endswith((".jpg", ".jpeg", ".png"))
     ]
 
-    # Path A: Real image inputs provided in agent_input["inputs"]
+    # If dev unit has no image inputs provided, auto-load dev image
+    if not is_sample_replay and dev_row is not None and not image_inputs:
+        photo_stem = dev_row.get("photo_stem", f"{subject_id}_open_box")
+        dev_img_file = DEV_IMAGES_DIR / f"{photo_stem}.jpeg"
+        if not dev_img_file.is_file():
+            dev_img_file = DEV_IMAGES_DIR / f"{photo_stem}.jpg"
+        if dev_img_file.is_file():
+            raw_bytes = dev_img_file.read_bytes()
+            sha = hashlib.sha256(raw_bytes).hexdigest()
+            rel_ref = dev_img_file.relative_to(ROOT_DIR).as_posix()
+            image_inputs = [{
+                "ref": rel_ref,
+                "kind": "image",
+                "sha256": sha,
+            }]
+
+    # Path A: Real image inputs provided or auto-loaded
     if image_inputs:
         input_dir = _resolve_input_dir()
 
-        # Validate safe path for ALL image inputs first (rejecting path traversal escaping INPUT_DIR)
+        # Validate safe path for ALL image inputs first (rejecting path traversal escaping INPUT_DIR or ROOT_DIR)
         safe_paths: List[Path] = []
         for inp in image_inputs:
             ref = inp["ref"]
@@ -444,7 +541,7 @@ def run_pack_pipeline(
             observation, latency_ms, model_info = active_adapter.analyze_box(
                 images=[it["bytes"] for it in loaded_images],
                 candidate_skus=candidate_skus,
-                catalogue=catalogue,
+                catalogue=dev_catalogue if dev_catalogue is not None else catalogue,
                 timeout_seconds=cfg.total_timeout_budget,
             )
         except (ModelProviderError, ModelTimeoutError, ModelParsingError, ModelError) as err:
@@ -509,7 +606,7 @@ def run_pack_pipeline(
         }
 
         return _build_response_record(
-            agent_input=agent_input, record_id=record_id, captured_at=sample_row["captured_at"], operator_id=operator_id,
+            agent_input=agent_input, record_id=record_id, captured_at=r["captured_at"], operator_id=operator_id,
             order_id=order_id, channel=channel, order_lines=r["order_lines"], candidate_skus=candidate_skus,
             checks=checks_dict, verdict=verdict, operator_action=operator_action, upstream_refs=upstream_refs,
             upstream_verdicts=upstream_verdicts, model_info=model_info, source="sample_replay",
