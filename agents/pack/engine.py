@@ -24,6 +24,7 @@ import os
 from pathlib import Path
 import re
 import struct
+import tempfile
 from typing import Any, Dict, List, Optional, Tuple
 
 from shared.utils import sample_data
@@ -108,10 +109,27 @@ def is_dev_unit_under_other_org(org_id: str, unit_id: str) -> bool:
     return any(u == unit_id and o != org_id for (o, u) in dev_rows.keys())
 
 
+def _resolve_upload_dir() -> Path:
+    env_dir = os.environ.get("UPLOAD_DIR")
+    if env_dir:
+        return Path(env_dir).resolve()
+    tmp = Path("/tmp") if Path("/tmp").is_dir() else Path(tempfile.gettempdir())
+    return (tmp / "cube_uploads").resolve()
+
+
 def _validate_safe_path(ref: str, input_dir: Path) -> Path:
-    """Ensures input ref does not escape input_dir or ROOT_DIR."""
+    """Ensures input ref does not escape input_dir, upload_dir, or ROOT_DIR."""
     if ref.startswith("/") or ref.startswith("\\") or ":" in ref:
         raise LookupError(f"Absolute paths forbidden in ref: {ref}")
+    if ref.startswith("uploads/"):
+        upload_dir = _resolve_upload_dir()
+        sub_ref = ref[len("uploads/"):]
+        target = (upload_dir / sub_ref).resolve()
+        try:
+            target.relative_to(upload_dir)
+            return target
+        except ValueError as exc:
+            raise LookupError(f"Path traversal detected in ref: {ref}") from exc
     if ref.startswith("agents/pack/data/"):
         target = (ROOT_DIR / ref).resolve()
         try:
@@ -403,7 +421,7 @@ def run_pack_pipeline(
     # 5. Determine inputs and execution path
     image_inputs = [
         inp for inp in agent_input.get("inputs", [])
-        if inp.get("kind") == "image" or str(inp.get("ref", "")).lower().endswith((".jpg", ".jpeg", ".png"))
+        if inp.get("kind") == "image" or str(inp.get("ref", "")).lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
     ]
 
     # If dev unit has no image inputs provided, auto-load dev image
@@ -695,6 +713,9 @@ def _build_response_record(
         "upstream_verdicts": upstream_verdicts,
         "candidate_skus": candidate_skus,
     }
+    if agent_input.get("context", {}).get("ad_hoc_upload"):
+        payload["ad_hoc_upload"] = True
+        payload["run_type"] = "ad_hoc_upload"
 
     record = build_record(
         agent_input,

@@ -17,6 +17,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 
 from shared.utils import sample_data
@@ -125,15 +126,22 @@ def vision_checks(request: dict, row: dict, po: PurchaseOrder, settings) -> tupl
     from .r2.vision import VisionService
 
     root = Path(os.environ.get("INPUT_DIR", ROOT / "data" / "input"))
+    upload_dir = Path(os.environ.get("UPLOAD_DIR") or (Path("/tmp") if Path("/tmp").is_dir() else Path(tempfile.gettempdir())) / "cube_uploads").resolve()
     images = []
     for item in image_inputs(request):
-        path = (root / item["ref"]).resolve()
-        if root.resolve() not in path.parents:  # path traversal: a ref must stay under the input root
-            raise ValueError(f"input ref escapes the input root: {item['ref']}")
+        ref = item["ref"]
+        if ref.startswith("uploads/"):
+            path = (upload_dir / ref[len("uploads/"):]).resolve()
+            if upload_dir not in path.parents and path != upload_dir:
+                raise ValueError(f"input ref escapes upload dir: {ref}")
+        else:
+            path = (root / ref).resolve()
+            if root.resolve() not in path.parents:  # path traversal: a ref must stay under the input root
+                raise ValueError(f"input ref escapes the input root: {ref}")
         images.append(ReceivingImage(image_id=item["ref"], inspection_id=request["workflow_id"], filename=path.name,
                                      stored_filename=path.name, image_path=str(path),
                                      image_type=path.stem.split("_")[-1], mime_type=MIME.get(path.suffix.lower(), "image/jpeg"),
-                                     file_size=path.stat().st_size, sha256_digest=item.get("sha256") or ""))
+                                     file_size=path.stat().st_size if path.is_file() else 0, sha256_digest=item.get("sha256") or ""))
     service = VisionService(SimpleNamespace(po=po, images=images))
     result = service.analyze(settings)
     evidence_by_id = {e["evidence_id"]: e["image_id"] for e in result["evidence"]}
