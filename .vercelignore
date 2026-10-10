@@ -29,3 +29,5 @@ tests/
 .env
 .env.*
 !.env.example
+
+agents/pack/eval/
