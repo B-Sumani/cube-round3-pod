@@ -11,12 +11,8 @@ import {
 } from 'lucide-react'
 
 export default function NavBar() {
-  const { org, operator, switchOrg, updateOperator, sessionWorkflows } = useSession()
+  const { org, operator, switchOrg, updateOperator, pendingCount } = useSession()
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
-
-  const reviewCount = sessionWorkflows.filter(
-    (w) => w.org_id === org && (w.status === 'BLOCKED' || w.final_outcome?.outcome === 'NEEDS_REVIEW')
-  ).length
 
   const navLinks = [
     {
@@ -29,7 +25,7 @@ export default function NavBar() {
       to: '/app/review',
       label: 'Review Queue',
       icon: ClipboardList,
-      badge: reviewCount,
+      badge: pendingCount || 0,
       tooltip: 'Units where an agent returned UNCERTAIN and a person must decide. Record who decided and why, then resume the workflow.',
     },
   ]

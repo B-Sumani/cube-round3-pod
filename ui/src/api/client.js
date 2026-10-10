@@ -159,6 +159,11 @@ export async function getCatalogue(orgId) {
   return request('/catalogue', { orgId })
 }
 
+/** Fetch review queue items scoped by tenant (orchestration/api.py) */
+export async function getReviewQueue(orgId) {
+  return request('/review', { orgId })
+}
+
 /** Run an agent stage on uploaded image file(s) (multipart/form-data) */
 export async function runStageUpload({ stage, file, files, unit_id, order_id, org_id, order_lines, route }) {
   const url = buildUrl(`/stages/${encodeURIComponent(stage)}/run-upload`)

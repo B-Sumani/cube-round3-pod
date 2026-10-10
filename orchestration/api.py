@@ -26,10 +26,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from shared.utils import sample_data
-from shared.utils.records import pending_output
+from shared.utils.records import pending_output, utcnow
 
 from .clients import AgentRejected, AgentUnavailable, HttpClient, client_for, load_manifest
-from .orchestrator import apply_override, bundle, default_flow_path, flow_stages, load_flow, resume, run_workflow, _validate
+from .orchestrator import apply_override, bundle, default_flow_path, flow_stages, load_flow, resume, run_workflow, _validate, _finalize
+from .rollup import effective
 from .store import EvidenceConflict, FileStore, TenantViolation, WorkflowBusy
 
 # Ensure in-process agents are used by default (e.g. for Vercel and local dev)
@@ -153,16 +154,188 @@ def resume_workflow(workflow_id: str, x_org_id: str | None = Header(None), org_i
     return resume(workflow_id, load_flow(FLOW), STORE, org_id=org)
 
 
+@router.post("/workflows/{workflow_id}/override")
 @router.post("/workflows/{workflow_id}/overrides")
 def override(workflow_id: str, body: dict, x_org_id: str | None = Header(None), org_id: str | None = Query(None)) -> dict:
     org = _org(x_org_id, org_id)
-    _get(workflow_id, org)
+    wf = _get(workflow_id, org)
+    record_id = body.get("record_id") or ""
+    if not record_id and body.get("stage"):
+        target_stage = body.get("stage")
+        for sr in wf.get("stage_results", []):
+            if sr.get("stage") == target_stage and sr.get("record_id"):
+                record_id = sr["record_id"]
+                break
+        if not record_id:
+            for rid in wf.get("evidence_references", []):
+                ev = STORE.get_evidence(rid, org)
+                if ev and ev.get("stage") == target_stage:
+                    record_id = rid
+                    break
+    new_verdict = body.get("new_verdict") or body.get("verdict", "")
+    actor = body.get("actor") or body.get("operator", "")
+    reason = body.get("reason", "")
+    new_outcome = body.get("new_outcome") or body.get("outcome")
     try:
-        return apply_override(workflow_id, STORE, record_id=body.get("record_id", ""), new_verdict=body.get("new_verdict", ""),
-                              actor=body.get("actor", ""), reason=body.get("reason", ""), new_outcome=body.get("new_outcome"),
+        return apply_override(workflow_id, STORE, record_id=record_id, new_verdict=new_verdict,
+                              actor=actor, reason=reason, new_outcome=new_outcome,
                               org_id=org)
     except (ValueError, EvidenceConflict) as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@router.get("/review")
+def review_queue_endpoint(
+    x_org_id: str | None = Header(None),
+    org_id: str | None = Query(None),
+) -> dict:
+    org = _org(x_org_id, org_id)
+
+    workflows = STORE.list_workflows(org)
+    all_evidence = STORE.list_evidence(org)
+    evidence_by_id = {rec["record_id"]: rec for rec in all_evidence}
+
+    pending_items = []
+    resolved_items = []
+    seen_records = set()
+
+    for wf in workflows:
+        overrides = wf.get("overrides", [])
+        evidence_refs = wf.get("evidence_references", [])
+        stage_results = {sr.get("record_id"): sr for sr in wf.get("stage_results", []) if sr.get("record_id")}
+
+        for rec_id in evidence_refs:
+            rec = evidence_by_id.get(rec_id) or STORE.get_evidence(rec_id, org)
+            if not rec:
+                continue
+            seen_records.add(rec_id)
+
+            eff_verdict, eff_needs_human = effective(wf, rec)
+            orig_verdict = rec.get("decision", {}).get("verdict", "UNCERTAIN")
+            orig_needs_human = bool(rec.get("decision", {}).get("needs_human"))
+
+            rec_overrides = [o for o in overrides if o.get("supersedes", {}).get("record_id") == rec_id]
+            has_override = len(rec_overrides) > 0
+
+            sr = stage_results.get(rec_id, {})
+            is_candidate = (
+                orig_verdict == "UNCERTAIN"
+                or orig_needs_human
+                or eff_verdict == "UNCERTAIN"
+                or eff_needs_human
+                or sr.get("verdict") == "UNCERTAIN"
+                or bool(sr.get("needs_human"))
+            )
+
+            if not is_candidate:
+                continue
+
+            stage = rec.get("stage") or sr.get("stage") or "unknown"
+            unit_id = (
+                rec.get("subject", {}).get("subject_id")
+                or rec.get("subject", {}).get("unit_id")
+                or wf.get("subject_id")
+                or wf.get("unit_id")
+                or "UNKNOWN"
+            )
+            is_ad_hoc = bool(
+                wf.get("is_ad_hoc_upload")
+                or sr.get("is_ad_hoc_upload")
+                or rec.get("payload", {}).get("ad_hoc_upload")
+                or (rec.get("inputs") and any("uploads/" in str(inp.get("ref", "")) for inp in rec.get("inputs", [])))
+            )
+
+            reason = (
+                (rec.get("error") or {}).get("message")
+                or rec.get("decision", {}).get("reason")
+                or sr.get("skipped_reason")
+                or (wf.get("status_reason") if wf.get("status") == "BLOCKED" else None)
+                or "Requires operator review"
+            )
+
+            is_resolved = has_override and eff_verdict != "UNCERTAIN" and not eff_needs_human
+
+            item = {
+                "id": rec_id,
+                "record_id": rec_id,
+                "evidence_record_id": rec_id,
+                "org_id": org,
+                "workflow_id": wf.get("workflow_id"),
+                "unit_id": unit_id,
+                "stage": stage,
+                "agent_id": rec.get("agent_id") or sr.get("agent_id") or "unknown",
+                "verdict": orig_verdict,
+                "effective_verdict": eff_verdict,
+                "needs_human": eff_needs_human,
+                "reason": reason,
+                "is_ad_hoc_upload": is_ad_hoc,
+                "status": "resolved" if is_resolved else "pending",
+                "has_override": has_override,
+                "override": rec_overrides[-1] if rec_overrides else None,
+                "captured_at": rec.get("captured_at"),
+                "produced_at": rec.get("produced_at"),
+                "overrides": rec_overrides,
+                "latest_override": rec_overrides[-1] if rec_overrides else None,
+            }
+
+            if is_resolved:
+                resolved_items.append(item)
+            else:
+                pending_items.append(item)
+
+    for rec in all_evidence:
+        rec_id = rec.get("record_id")
+        if not rec_id or rec_id in seen_records:
+            continue
+        orig_verdict = rec.get("decision", {}).get("verdict", "UNCERTAIN")
+        orig_needs_human = bool(rec.get("decision", {}).get("needs_human"))
+        if orig_verdict == "UNCERTAIN" or orig_needs_human:
+            unit_id = (
+                rec.get("subject", {}).get("subject_id")
+                or rec.get("subject", {}).get("unit_id")
+                or "UNKNOWN"
+            )
+            wf_id = rec.get("workflow_id") or f"WF-{org}-{unit_id}"
+            is_ad_hoc = bool(
+                rec.get("payload", {}).get("ad_hoc_upload")
+                or (rec.get("inputs") and any("uploads/" in str(inp.get("ref", "")) for inp in rec.get("inputs", [])))
+            )
+            item = {
+                "id": rec_id,
+                "record_id": rec_id,
+                "evidence_record_id": rec_id,
+                "org_id": org,
+                "workflow_id": wf_id,
+                "unit_id": unit_id,
+                "stage": rec.get("stage") or "unknown",
+                "agent_id": rec.get("agent_id") or "unknown",
+                "verdict": orig_verdict,
+                "effective_verdict": orig_verdict,
+                "needs_human": orig_needs_human,
+                "reason": (rec.get("error") or {}).get("message") or rec.get("decision", {}).get("reason") or "Requires operator review",
+                "is_ad_hoc_upload": is_ad_hoc,
+                "status": "pending",
+                "has_override": False,
+                "override": None,
+                "captured_at": rec.get("captured_at"),
+                "produced_at": rec.get("produced_at"),
+                "overrides": [],
+                "latest_override": None,
+            }
+            pending_items.append(item)
+
+    pending_items.sort(key=lambda x: (x.get("unit_id") or "", x.get("stage") or ""))
+    resolved_items.sort(key=lambda x: (x.get("unit_id") or "", x.get("stage") or ""))
+
+    return {
+        "org_id": org,
+        "pending_count": len(pending_items),
+        "resolved_count": len(resolved_items),
+        "total_count": len(pending_items) + len(resolved_items),
+        "pending": pending_items,
+        "resolved": resolved_items,
+        "items": pending_items + resolved_items,
+    }
 
 
 @router.get("/catalogue")
@@ -407,6 +580,9 @@ async def run_upload_endpoint(
     except Exception:
         pass
 
+    wf_id = f"WF-{org}-{target_unit}"
+    is_uncertain = (ev["decision"]["verdict"] == "UNCERTAIN" or bool(ev["decision"].get("needs_human")))
+
     stage_result = {
         "stage": stage,
         "agent_id": ev["agent_id"],
@@ -422,16 +598,85 @@ async def run_upload_endpoint(
         "attempts": 1,
         "started_at": ev.get("captured_at"),
         "finished_at": ev.get("produced_at"),
-    }
-    wf = {
-        "workflow_id": f"WF-{org}-{target_unit}",
-        "org_id": org,
-        "subject_id": target_unit,
-        "status": "COMPLETED" if ev["status"] == "completed" else "FAILED",
-        "stage_results": [stage_result],
-        "evidence_references": [ev["record_id"]],
         "is_ad_hoc_upload": True,
     }
+
+    existing_wf = None
+    try:
+        existing_wf = STORE.load_workflow(wf_id, org)
+    except Exception:
+        pass
+
+    if existing_wf is not None and not existing_wf.get("is_ad_hoc_upload"):
+        if ev["record_id"] not in existing_wf.get("evidence_references", []):
+            existing_wf.setdefault("evidence_references", []).append(ev["record_id"])
+        srs = existing_wf.get("stage_results", [])
+        idx = next((i for i, s in enumerate(srs) if s.get("stage") == stage), None)
+        if idx is not None:
+            srs[idx] = stage_result
+        else:
+            srs.append(stage_result)
+        existing_wf["stage_results"] = srs
+        existing_wf.setdefault("context", {})["ad_hoc_upload"] = True
+        try:
+            _finalize(existing_wf, STORE)
+            wf = existing_wf
+        except Exception:
+            wf = existing_wf
+            try:
+                STORE.save_workflow(wf, org)
+            except Exception:
+                pass
+    else:
+        now = utcnow()
+        wf = {
+            "schema_version": "1.0",
+            "workflow_id": wf_id,
+            "flow_id": "standard-v1",
+            "org_id": org,
+            "subject_id": target_unit,
+            "status": "BLOCKED" if is_uncertain else ("COMPLETED" if ev["status"] == "completed" else "FAILED"),
+            "status_reason": ev["decision"].get("reason") or ("a person must decide: " + stage if is_uncertain else "ad hoc upload"),
+            "stage_results": [stage_result],
+            "evidence_references": [ev["record_id"]],
+            "overrides": [],
+            "errors": [ev["error"]] if ev.get("error") else [],
+            "current_stage": stage,
+            "previous_stage": None,
+            "halted": None,
+            "transitions": [{"at": now, "event": "workflow_created", "stage": stage, "detail": "ad hoc upload"}],
+            "context": {
+                "org_id": org,
+                "unit_id": target_unit,
+                "route": effective_route,
+                "ad_hoc_upload": True,
+                **({"order_id": target_order_id} if target_order_id else {}),
+                **({"order_lines": effective_order_lines} if effective_order_lines else {}),
+            },
+            "timestamps": {
+                "created_at": now,
+                "updated_at": now,
+                "started_at": ev.get("captured_at") or now,
+                "completed_at": None if is_uncertain else (now if ev["status"] == "completed" else None),
+            },
+            "final_outcome": {
+                "workflow_id": wf_id,
+                "outcome": "NEEDS_REVIEW" if is_uncertain else ("CLEAN" if ev["decision"]["verdict"] == "PASS" else "EXCEPTION"),
+                "verdict": ev["decision"]["verdict"],
+                "reason": ev["decision"].get("reason") or ("Human review requested by: " + stage if is_uncertain else "ad hoc upload"),
+                "needs_human": is_uncertain,
+                "provisional": is_uncertain,
+                "contributing_records": [ev["record_id"]],
+                "effective_verdicts": {stage: ev["decision"]["verdict"]},
+                "decided_by": "ad_hoc_upload",
+                "decided_at": now,
+            },
+            "is_ad_hoc_upload": True,
+        }
+        try:
+            STORE.save_workflow(wf, org)
+        except Exception:
+            pass
     return {
         "workflow": wf,
         "stage_result": stage_result,

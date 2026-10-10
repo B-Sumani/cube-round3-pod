@@ -1,5 +1,6 @@
-import React, { createContext, useContext, useState, useEffect } from 'react'
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react'
 import { BRAND_NAME } from '../config/brand.js'
+import { getReviewQueue } from '../api/client.js'
 
 const SessionContext = createContext(null)
 
@@ -12,6 +13,10 @@ const STORAGE_KEY_EVIDENCE = `${STORAGE_PREFIX}_session_evidence`
 export function SessionProvider({ children }) {
   const [org, setOrg] = useState(() => sessionStorage.getItem(STORAGE_KEY_ORG) || 'org_demo_alpha')
   const [operator, setOperator] = useState(() => sessionStorage.getItem(STORAGE_KEY_OPERATOR) || 'Operator')
+
+  // Review Queue state from API
+  const [reviewQueue, setReviewQueue] = useState({ pending: [], resolved: [], pending_count: 0, resolved_count: 0 })
+  const [reviewLoading, setReviewLoading] = useState(false)
 
   // Workflows executed during this session
   const [sessionWorkflows, setSessionWorkflows] = useState(() => {
@@ -32,6 +37,22 @@ export function SessionProvider({ children }) {
       return {}
     }
   })
+
+  const refreshReviewQueue = useCallback(async () => {
+    try {
+      setReviewLoading(true)
+      const data = await getReviewQueue(org)
+      setReviewQueue(data || { pending: [], resolved: [], pending_count: 0, resolved_count: 0 })
+    } catch (err) {
+      console.warn('Could not refresh review queue:', err)
+    } finally {
+      setReviewLoading(false)
+    }
+  }, [org])
+
+  useEffect(() => {
+    refreshReviewQueue()
+  }, [refreshReviewQueue])
 
   useEffect(() => {
     try {
@@ -101,6 +122,7 @@ export function SessionProvider({ children }) {
         return next
       })
     }
+    refreshReviewQueue()
   }
 
   const updateWorkflow = (updatedWorkflow, updatedBundle = {}) => {
@@ -123,6 +145,7 @@ export function SessionProvider({ children }) {
         return next
       })
     }
+    refreshReviewQueue()
   }
 
   return (
@@ -136,6 +159,11 @@ export function SessionProvider({ children }) {
         recentEvidenceByStage,
         recordWorkflowRun,
         updateWorkflow,
+        reviewQueue,
+        pendingCount: reviewQueue?.pending_count || 0,
+        resolvedCount: reviewQueue?.resolved_count || 0,
+        reviewLoading,
+        refreshReviewQueue,
       }}
     >
       {children}

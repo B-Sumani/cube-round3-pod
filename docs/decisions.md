@@ -289,4 +289,26 @@ _Add entries below._
   - All evidence displays are visually unified and cryptographically sealed.
   - 100% backward compatibility preserved for existing sample workflows and automated test suites.
 
-
+### D-126 · Comprehensive Review Queue for Agent & Upload UNCERTAIN / needs_human Decisions
+- Date / Owner: 2026-10-10 / Pod (orchestration + UI)
+- Context:
+  - Any stage in the five-agent pipeline (Receiving, Prep, Pack, Returns, Recovery) can return `UNCERTAIN` or set `decision.needs_human: true`.
+  - Ad-hoc image uploads (`POST /api/stages/{stage}/run-upload`) can return `UNCERTAIN` (e.g. when image quality is unreadable or vision API keys are not configured).
+  - All such items must reliably populate the operator Review Queue (`ReviewPage`), isolated strictly by tenant (`X-Org-Id`).
+  - Recorded human overrides must resolve pending review items without ever mutating or deleting original evidence records.
+- Decision:
+  1. **Exhaustive Review Queue Discovery (`GET /api/review`)**:
+     - Evaluates all tenant workflows and standalone evidence records in storage.
+     - Detects unresolved ambiguity: `verdict == "UNCERTAIN"` or `needs_human: true` at either the stage evidence level or effective workflow rollup level.
+     - Separates items into `pending` and `resolved` buckets with accurate `pending_count` and `resolved_count`.
+     - Ad-hoc uploads are tagged with `is_ad_hoc_upload: true` without fabricating missing stages.
+  2. **Strict Tenant Isolation**:
+     - Storage and API layer strictly scope review items to `X-Org-Id` / `org_id`. Cross-tenant records never leak across queue listings.
+  3. **Immutable Evidence and Override Lifecycle**:
+     - Operator decisions submitted via `POST /api/workflows/{workflow_id}/overrides` (or `/override`) append an immutable override event to `wf["overrides"]` referencing the original evidence record ID.
+     - Overridden items immediately transition from `pending` to `resolved`, decrementing the pending badge.
+     - Original evidence records in the store remain 100% immutable and unchanged.
+  4. **Responsive UI & Real-Time Header Badge**:
+     - `ReviewPage.jsx` renders tabs ("Pending Review ({pendingCount})" and "Resolved ({resolvedCount})"), cards displaying stage, unit ID, verdict badges, reason, copyable record ID, and dossier inspection workspace.
+     - Navigation bar badge reflects `pendingCount` from `useSession()`, automatically refreshing when workflows run or overrides are registered.
+     - Responsive down to 360px mobile viewports with 44px tap targets and word-wrapping on record IDs.

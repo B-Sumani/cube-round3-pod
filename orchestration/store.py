@@ -132,6 +132,20 @@ class MemoryStore:
         if existing["content_hash"] != record["content_hash"]:
             raise EvidenceConflict(f"{record['record_id']} already exists with different content; evidence is immutable")
 
+    def list_workflows(self, org_id: str | None = None) -> list[dict]:
+        with self._locks_guard:
+            items = [json.loads(json.dumps(w)) for w in self.workflows.values()]
+        if org_id is not None:
+            items = [w for w in items if w.get("org_id") == org_id]
+        return items
+
+    def list_evidence(self, org_id: str | None = None) -> list[dict]:
+        with self._locks_guard:
+            items = [json.loads(json.dumps(rec)) for rec in self.evidence.values()]
+        if org_id is not None:
+            items = [rec for rec in items if _record_org(rec) == org_id]
+        return items
+
 
 _SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -236,3 +250,35 @@ class FileStore(MemoryStore):
                 return False
         finally:
             tmp.unlink(missing_ok=True)
+
+    def list_workflows(self, org_id: str | None = None) -> list[dict]:
+        p = self.root / "workflows"
+        if not p.exists():
+            return []
+        items = []
+        for f in p.glob("*.json"):
+            if f.name.startswith("."):
+                continue
+            try:
+                wf = json.loads(f.read_text(encoding="utf-8"))
+                if org_id is None or wf.get("org_id") == org_id:
+                    items.append(wf)
+            except Exception:
+                pass
+        return items
+
+    def list_evidence(self, org_id: str | None = None) -> list[dict]:
+        p = self.root / "evidence"
+        if not p.exists():
+            return []
+        items = []
+        for f in p.glob("*.json"):
+            if f.name.startswith("."):
+                continue
+            try:
+                rec = json.loads(f.read_text(encoding="utf-8"))
+                if org_id is None or _record_org(rec) == org_id:
+                    items.append(rec)
+            except Exception:
+                pass
+        return items
