@@ -1,4 +1,6 @@
 import os
+from pathlib import Path
+import tempfile
 import time
 import json
 import re
@@ -104,13 +106,14 @@ def call_gemini_vision(request: Dict[str, Any], sample_row: Dict[str, Any]) -> T
         pkg_type = context.get("packaging", "unspecified")
         parts = [f"Packaging Context: {pkg_type}\n\nPerform all relevant Amazon FBA prep compliance checks."]
 
+        upload_dir = Path(os.environ.get("UPLOAD_DIR") or (Path("/tmp") if Path("/tmp").is_dir() else Path(tempfile.gettempdir())) / "cube_uploads").resolve()
         for item in inputs:
             ref_path = item.get("ref", "")
-            if os.path.exists(ref_path):
-                with open(ref_path, "rb") as f:
-                    data = f.read()
-                    mime = "image/png" if ref_path.lower().endswith(".png") else "image/jpeg"
-                    parts.append(types.Part.from_bytes(data=data, mime_type=mime))
+            resolved_path = (upload_dir / ref_path[len("uploads/"):]) if ref_path.startswith("uploads/") else Path(ref_path)
+            if resolved_path.is_file():
+                data = resolved_path.read_bytes()
+                mime = "image/png" if str(resolved_path).lower().endswith(".png") else "image/jpeg"
+                parts.append(types.Part.from_bytes(data=data, mime_type=mime))
 
         start_time = time.perf_counter()
         response = client.models.generate_content(

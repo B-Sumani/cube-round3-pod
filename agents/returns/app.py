@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import tempfile
 from typing import Any
 
 from shared.utils import sample_data
@@ -39,7 +40,13 @@ def input_root() -> Path:
 
 
 def resolve_input_ref(ref: str) -> Path:
-    """Resolve an input reference safely inside INPUT_DIR."""
+    """Resolve an input reference safely inside INPUT_DIR or UPLOAD_DIR."""
+    if ref.startswith("uploads/"):
+        upload_dir = Path(os.environ.get("UPLOAD_DIR") or (Path("/tmp") if Path("/tmp").is_dir() else Path(tempfile.gettempdir())) / "cube_uploads").resolve()
+        path = (upload_dir / ref[len("uploads/"):]).resolve()
+        if upload_dir not in path.parents and path != upload_dir:
+            raise ValueError(f"Input reference escapes UPLOAD_DIR: {ref}")
+        return path
     root = input_root()
     path = (root / ref).resolve()
 

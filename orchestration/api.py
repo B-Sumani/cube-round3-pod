@@ -14,19 +14,22 @@ No authentication is included: X-Org-Id is a scoping key, not a credential. Add 
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import tempfile
 
-from fastapi import APIRouter, FastAPI, Header, HTTPException, Query, Request
+from fastapi import APIRouter, FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from shared.utils import sample_data
+from shared.utils.records import pending_output
 
-from .clients import HttpClient, client_for, load_manifest
-from .orchestrator import apply_override, bundle, default_flow_path, flow_stages, load_flow, resume, run_workflow
+from .clients import AgentRejected, AgentUnavailable, HttpClient, client_for, load_manifest
+from .orchestrator import apply_override, bundle, default_flow_path, flow_stages, load_flow, resume, run_workflow, _validate
 from .store import EvidenceConflict, FileStore, TenantViolation, WorkflowBusy
 
 # Ensure in-process agents are used by default (e.g. for Vercel and local dev)
@@ -111,6 +114,8 @@ def create(body: dict) -> dict:
         raise HTTPException(422, "org_id must match [A-Za-z0-9_]+ and unit_id [A-Za-z0-9][A-Za-z0-9_.-]*")
     case = {"org_id": org, "unit_id": subject, "route": body.get("route") or sample_data.route(subject, org),
             "returned": body.get("returned", sample_data.has("returns", subject, org))}
+    if body.get("order_lines"):
+        case["order_lines"] = str(body["order_lines"]).strip()
     return run_workflow(case, load_flow(FLOW), STORE)
 
 
@@ -158,6 +163,240 @@ def override(workflow_id: str, body: dict, x_org_id: str | None = Header(None), 
                               org_id=org)
     except (ValueError, EvidenceConflict) as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@router.get("/catalogue")
+def catalogue_endpoint(x_org_id: str | None = Header(None), org_id: str | None = Query(None)) -> list[dict]:
+    org = _org(x_org_id, org_id)
+    # Tenancy check: verify org is authorized
+    try:
+        from agents.pack.catalogue import get_dev_catalogue
+        cat_map = get_dev_catalogue(org)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+    cat_csv = Path(__file__).resolve().parents[1] / "agents" / "pack" / "data" / "catalogue.csv"
+    rows = []
+    if cat_csv.is_file():
+        import csv
+        with open(cat_csv, newline="", encoding="utf-8") as f:
+            for r in csv.DictReader(f):
+                sku = (r.get("sku") or "").strip()
+                title = (r.get("title") or "").strip()
+                desc = (r.get("description") or "").strip()
+                pkg = r.get("expected_packaging") or r.get("packaging") or (
+                    "bottle" if "bottle" in desc.lower() else ("box" if "box" in desc.lower() or "carton" in desc.lower() else "polybag" if "bag" in desc.lower() else "standard")
+                )
+                barcode = r.get("barcode") or f"BAR-{sku}"
+                hazmat = "hazmat" in desc.lower() or "sanitizer" in desc.lower() or "acid" in desc.lower()
+                rows.append({
+                    "sku": sku,
+                    "name": title,
+                    "title": title,
+                    "description": desc,
+                    "expected_packaging": pkg,
+                    "packaging_type": pkg,
+                    "barcode": barcode,
+                    "hazmat": hazmat,
+                })
+    else:
+        for sku, info in cat_map.items():
+            title = info.get("title", "")
+            desc = info.get("description", "")
+            pkg = "bottle" if "bottle" in desc.lower() else ("box" if "box" in desc.lower() or "carton" in desc.lower() else "standard")
+            rows.append({
+                "sku": sku,
+                "name": title,
+                "title": title,
+                "description": desc,
+                "expected_packaging": pkg,
+                "packaging_type": pkg,
+                "barcode": f"BAR-{sku}",
+                "hazmat": "hazmat" in desc.lower() or "sanitizer" in desc.lower() or "acid" in desc.lower(),
+            })
+    return rows
+
+
+MAX_UPLOAD_BYTES = int(4.5 * 1024 * 1024)
+ALLOWED_UPLOAD_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+ALLOWED_MIME_TYPES = {"image/jpeg", "image/png", "image/webp", "image/jpg", "application/octet-stream"}
+
+
+def _resolve_upload_dir() -> Path:
+    env_dir = os.environ.get("UPLOAD_DIR")
+    if env_dir:
+        d = Path(env_dir).resolve()
+    else:
+        tmp = Path("/tmp") if Path("/tmp").is_dir() else Path(tempfile.gettempdir())
+        d = (tmp / "cube_uploads").resolve()
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+@router.post("/stages/{stage}/run-upload")
+async def run_upload_endpoint(
+    stage: str,
+    file: UploadFile = File(...),
+    unit_id: str | None = Form(None),
+    unit_id_query: str | None = Query(None, alias="unit_id"),
+    org_id: str | None = Form(None),
+    org_id_query: str | None = Query(None, alias="org_id"),
+    x_org_id: str | None = Header(None),
+    order_lines: str | None = Form(None),
+    order_lines_query: str | None = Query(None, alias="order_lines"),
+    route: str | None = Form(None),
+    channel: str | None = Form(None),
+) -> dict:
+    target_unit = unit_id or unit_id_query
+    if not target_unit:
+        raise HTTPException(422, "unit_id is required")
+
+    org = _org(x_org_id, org_id or org_id_query)
+    if not ORG_ID.match(str(org)) or not SUBJECT_ID.match(str(target_unit)) or ".." in str(target_unit):
+        raise HTTPException(422, "org_id must match [A-Za-z0-9_]+ and unit_id [A-Za-z0-9][A-Za-z0-9_.-]*")
+
+    # Validate stage
+    valid_stages = {"receiving", "prep", "pack", "returns", "recovery"}
+    if stage not in valid_stages:
+        raise HTTPException(404, f"Unknown stage: {stage}")
+
+    # Validate file format
+    ext = Path(file.filename or "").suffix.lower()
+    ct = (file.content_type or "").lower()
+    if ext not in ALLOWED_UPLOAD_EXTS and ct not in ALLOWED_MIME_TYPES:
+        raise HTTPException(422, f"Unsupported file type '{ext or ct}'. Allowed formats: jpg, jpeg, png, webp")
+    if ext and ext not in ALLOWED_UPLOAD_EXTS:
+        raise HTTPException(422, f"Unsupported file extension '{ext}'. Allowed formats: jpg, jpeg, png, webp")
+
+    # Read bytes and validate size (4.5 MB serverless limit)
+    raw_bytes = await file.read()
+    if len(raw_bytes) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, f"File too large ({len(raw_bytes)} bytes). Maximum allowed size is 4.5 MB")
+
+    # Tenancy check: refuse cross-tenant requests
+    if stage == "pack":
+        from agents.pack.engine import is_dev_unit_under_other_org
+        if is_dev_unit_under_other_org(org, target_unit):
+            raise HTTPException(404, f"Unit {target_unit} not found for organisation {org}")
+        if not sample_data.has("pack", target_unit, org):
+            for other_org in ("org_demo_alpha", "org_demo_bravo"):
+                if other_org != org and sample_data.has("pack", target_unit, other_org):
+                    raise HTTPException(404, f"Unit {target_unit} not found for organisation {org}")
+    else:
+        for other_org in ("org_demo_alpha", "org_demo_bravo"):
+            if other_org != org and sample_data.has(stage, target_unit, other_org):
+                if not sample_data.has(stage, target_unit, org):
+                    raise HTTPException(404, f"Unit {target_unit} not found for organisation {org}")
+
+    # Content-addressed storage: sha256
+    sha256 = hashlib.sha256(raw_bytes).hexdigest()
+    if ext not in ALLOWED_UPLOAD_EXTS:
+        ext = ".png" if ct == "image/png" else (".webp" if ct == "image/webp" else ".jpg")
+    dest_filename = f"{sha256}{ext}"
+
+    upload_dir = _resolve_upload_dir()
+    dest_path = upload_dir / dest_filename
+    dest_path.write_bytes(raw_bytes)
+    ref = f"uploads/{dest_filename}"
+
+    # Build agent input
+    effective_order_lines = (order_lines or order_lines_query or "").strip()
+    effective_route = route or ("mfn" if stage == "pack" else sample_data.route(target_unit, org))
+    agent_input = {
+        "schema_version": "1.0",
+        "request_id": f"upload-{stage}-{target_unit}-{sha256[:8]}",
+        "workflow_id": f"WF-{org}-{target_unit}",
+        "stage": stage,
+        "subject": {
+            "org_id": org,
+            "subject_id": target_unit,
+            "route": effective_route,
+        },
+        "inputs": [
+            {
+                "ref": ref,
+                "kind": "image",
+                "sha256": sha256,
+            }
+        ],
+        "previous_evidence": [],
+        "context": {
+            "overrides": [],
+            "case": {
+                "org_id": org,
+                "unit_id": target_unit,
+                "route": effective_route,
+                "ad_hoc_upload": True,
+                **({"order_lines": effective_order_lines} if effective_order_lines else {}),
+            },
+            "ad_hoc_upload": True,
+            "run_type": "ad_hoc_upload",
+            **({"order_lines": effective_order_lines} if effective_order_lines else {}),
+        },
+    }
+
+    # Run agent through orchestrator client
+    client = client_for(stage)
+    manifest = load_manifest(stage)
+    agent_id = manifest.get("agent_id", f"{stage}-agent")
+
+    out = None
+    try:
+        out = client.run(agent_input, 30.0)
+    except AgentRejected as exc:
+        raise HTTPException(404, f"Agent refused request: {exc}") from exc
+    except AgentUnavailable as exc:
+        out = pending_output(agent_input, code="agent_unavailable", message=str(exc), retryable=True, agent_id=agent_id)
+    except Exception as exc:
+        out = pending_output(agent_input, code="agent_exception", message=f"{type(exc).__name__}: {exc}", retryable=False, agent_id=agent_id)
+
+    # Validate output
+    wf_stub = {"workflow_id": f"WF-{org}-{target_unit}", "org_id": org, "subject_id": target_unit}
+    bad = _validate(out, wf_stub, stage)
+    if bad:
+        out = pending_output(agent_input, code="invalid_output", message="; ".join(bad), retryable=False, agent_id=agent_id)
+
+    ev = out["evidence"]
+    if isinstance(ev.get("payload"), dict):
+        ev["payload"]["ad_hoc_upload"] = True
+    try:
+        STORE.put_evidence(ev, org)
+    except Exception:
+        pass
+
+    stage_result = {
+        "stage": stage,
+        "agent_id": ev["agent_id"],
+        "state": "completed" if ev["status"] == "completed" else "error",
+        "verdict": ev["decision"]["verdict"],
+        "outcome": ev["decision"]["outcome"],
+        "needs_human": ev["decision"].get("needs_human"),
+        "record_id": ev["record_id"],
+        "evidence_status": ev["status"],
+        "error": ev.get("error"),
+        "next_step_recommendation": out.get("next_step_recommendation"),
+        "runs": 1,
+        "attempts": 1,
+        "started_at": ev.get("captured_at"),
+        "finished_at": ev.get("produced_at"),
+    }
+    wf = {
+        "workflow_id": f"WF-{org}-{target_unit}",
+        "org_id": org,
+        "subject_id": target_unit,
+        "status": "COMPLETED" if ev["status"] == "completed" else "FAILED",
+        "stage_results": [stage_result],
+        "evidence_references": [ev["record_id"]],
+        "is_ad_hoc_upload": True,
+    }
+    return {
+        "workflow": wf,
+        "stage_result": stage_result,
+        "evidence": ev,
+        "output": out,
+        "is_ad_hoc_upload": True,
+        "storage_note": "Uploaded images are stored in ephemeral storage and will disappear on container restart.",
+    }
 
 
 # Include routes at root and with /api prefix

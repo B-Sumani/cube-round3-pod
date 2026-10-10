@@ -184,12 +184,40 @@ The orchestrator (`orchestration/`) is the central control plane and single sour
 
 The Round 2 Prep agent is fully integrated into the orchestration pipeline:
 1. Implemented under `agents/prep/` ([PROVENANCE](agents/prep/PROVENANCE.md)) with rule-based engine `agents/prep/engine.py` and FastAPI/in-process handler `agents/prep/app.py`.
-2. Configured in `agents/prep/agent.json` with `"implementation": "real"`, `"owner": "@B-Sumani"`, and `"mode": "inproc"`.
+2. Configured in `agents/prep/agent.json` with `"implementation": "real"`, `"owner": "@jpatty-vin"`, and `"mode": "inproc"`.
 3. Evaluates FNSKU label placement, original barcode coverage, and handling marks. Produces contract-valid `AgentOutput` sealed with SHA-256 envelopes.
 4. Recovery consumes Prep evidence directly: when Prep confirms unit compliance (`PASS`), Recovery disputes contradicted `inbound_defect_fee` and `prep_fee` charges (`CONTRADICTS`), recommending claims.
 5. If Prep evidence is absent or incomplete, Recovery strictly retains `SILENT` position to avoid false disputes.
 
-### 5. Failure model (what we break in the demo)
+### 5. Pack Dev Dataset Wiring & Image Upload Architecture
+
+#### A. Dual Dataset Resolution (Dev vs Sample)
+- Pack data is hosted under `agents/pack/data/` (`catalogue.csv`, `dev/input.csv`, `dev/images/`).
+- Evaluation files are isolated under `agents/pack/eval/` (`truth.csv`, `dev_set.csv`, `run_eval.py`). The runtime agent **never** accesses `eval/`.
+- `agents/pack/engine.py` inspects `(org_id, unit_id)`:
+  - If the unit is found in `dev/input.csv` for that org, it resolves the carton image from `dev/images/` and catalogue from `catalogue.csv`.
+  - Otherwise, it falls back seamlessly to the organiser sample dataset (`pack_sample.csv`).
+  - Strict tenant scoping prevents overlapping unit IDs (e.g. `UNIT-0010`, `UNIT-0043`) from leaking across organizations.
+
+#### B. Tenant-Scoped Product Catalogue & Order Builder (UI)
+- Backend endpoint `GET /api/catalogue` (and `/catalogue`) serves catalogue rows scoped by tenant (`X-Org-Id`).
+- The Pack Manager page displays a searchable product catalogue table where operators can pick SKUs and quantities (`[-] qty [+]`) to construct expected order lines.
+- When executing checks, the expected order lines are rendered side-by-side with observed carton contents for direct visual audit.
+
+#### C. Ad-Hoc Content-Addressed Image Upload & Ephemeral Storage
+- **Client-Side Compression:** Images (JPG, PNG, WebP) are downscaled (max 1920px) and progressively compressed using HTML5 Canvas to strictly under 3 MB, guarding against Vercel's 4.5 MB request body limit. Files exceeding limits are rejected client-side with clear user guidance.
+- **Endpoint (`POST /api/stages/{stage}/run-upload`):**
+  - Enforces MIME types and file extensions (`.jpg`, `.jpeg`, `.png`, `.webp`).
+  - Rejects payloads exceeding 4.5 MB with HTTP 413.
+  - Enforces tenant isolation (refusing wrong-tenant requests with HTTP 404).
+  - Computes the SHA-256 digest of the image bytes and saves to `/tmp/cube_uploads/<sha256>.<ext>`.
+  - Invokes the agent through the orchestrator's standard invoke-and-validate path with content-addressed reference `uploads/<sha256>.<ext>`.
+  - The resulting `EvidenceRecord` captures the SHA-256 hash and ref; **raw image bytes are never serialized into evidence**.
+  - Sets `payload.ad_hoc_upload: true` and `context.ad_hoc_upload: true`.
+  - Offline environments without a vision API key fail open gracefully to an honest `UNCERTAIN` (`pending_output`).
+  - Stored in ephemeral container storage with clear UI notification to operators.
+
+### 6. Failure model (what we break in the demo)
 
 | Injected | What happens |
 |---|---|
@@ -198,15 +226,19 @@ The Round 2 Prep agent is fully integrated into the orchestration pipeline:
 | Invalid output / wrong tenant in output | Rejected before storage, error recorded, `FAILED`. |
 | UNCERTAIN identity (e.g. UNIT-0029) | `BLOCKED` / `NEEDS_REVIEW`. `apply_override` by a named actor is recorded and the outcome re-derived; the original record is unchanged. |
 | Pack defect (`stop_and_fix`) | `EXCEPTION` outcome with `needs_human: true`. Package held on line until human override. |
+| Oversize image upload (> 4.5 MB) | Backend rejects with HTTP 413; client compresses < 3 MB before sending. |
+| Unsupported file upload (e.g. .txt/.pdf) | Backend rejects with HTTP 422. |
 
-### 6. Deployment
+### 7. Deployment
 
 - **In-process (single process):** `python -m orchestration.run` (CLI) or `uvicorn orchestration.api:app --port 8100` (API).
 - **HTTP mode:** Run each agent with `uvicorn agents.<stage>.app:app --port <port>` and set `<STAGE>_URL`.
-- **UI:** Single Page Application under `ui/` built with Vite (`npm run build` -> `ui/dist/`), communicating with orchestrator API at `/workflows`, `/workflows/{id}`, `/workflows/{id}/evidence`, etc.
+- **UI:** Single Page Application under `ui/` built with Vite (`npm run build` -> `ui/dist/`), communicating with orchestrator API at `/workflows`, `/workflows/{id}`, `/workflows/{id}/evidence`, `/catalogue`, and `/stages/{stage}/run-upload`.
+- **Vercel Multi-Service Deployment:** Configured via `vercel.json` routing `/api/(.*)` to FastAPI and `/(.*)` to Vite frontend. Uses ephemeral `/tmp` storage for file store and content-addressed uploads.
 
-### 7. Known limits
+### 8. Known limits
 
 - **Receiving vision mode:** Tested deterministically in recorded mode; live vision mode requires Gemini API credentials.
 - **In-process thread cancellation:** Python cannot kill running threads; timed-out threads are orphaned and their delayed results discarded without corrupting store state.
 - **Storage locking scope:** File locks are process-safe on a single host (`msvcrt`/`fcntl`); multi-node deployments require distributed locking (e.g. Redis/PostgreSQL).
+- **Ephemeral container storage:** On serverless hosting (Vercel), uploaded files and FileStore artifacts reside in `/tmp` and reset across container recycles. Persistence across serverless lifecycles requires S3/GCS or external DB storage.

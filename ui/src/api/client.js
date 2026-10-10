@@ -96,13 +96,16 @@ export async function getHealth() {
 
 
 /** Run or advance a workflow case (orchestration/api.py:42-49) */
-export async function createWorkflow({ org_id, unit_id, route, returned }) {
+export async function createWorkflow({ org_id, unit_id, route, returned, order_lines }) {
   const body = { org_id, unit_id }
   if (route && route !== 'auto') {
     body.route = route
   }
   if (typeof returned === 'boolean') {
     body.returned = returned
+  }
+  if (order_lines) {
+    body.order_lines = order_lines
   }
   return request('/workflows', {
     method: 'POST',
@@ -149,4 +152,62 @@ export async function applyOverride(workflowId, { record_id, new_verdict, actor,
     body: JSON.stringify(body),
     orgId: org,
   })
+}
+
+/** Fetch product catalogue for Pack Manager scoped by tenant (orchestration/api.py) */
+export async function getCatalogue(orgId) {
+  return request('/catalogue', { orgId })
+}
+
+/** Run an agent stage on an uploaded image file (multipart/form-data) */
+export async function runStageUpload({ stage, file, unit_id, org_id, order_lines, route }) {
+  const url = buildUrl(`/stages/${encodeURIComponent(stage)}/run-upload`)
+  const org = org_id || getActiveOrg()
+  const formData = new FormData()
+  formData.append('file', file)
+  formData.append('unit_id', unit_id)
+  if (org) {
+    formData.append('org_id', org)
+  }
+  if (order_lines) {
+    formData.append('order_lines', order_lines)
+  }
+  if (route) {
+    formData.append('route', route)
+  }
+
+  const headers = {
+    'X-Org-Id': org,
+  }
+
+  let res
+  try {
+    res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: formData,
+    })
+  } catch (err) {
+    throw new Error(`Network failure connecting to orchestrator at ${url}: ${err.message}`)
+  }
+
+  let data = null
+  const text = await res.text()
+  if (text) {
+    try {
+      data = JSON.parse(text)
+    } catch {
+      data = { raw: text }
+    }
+  }
+
+  if (!res.ok) {
+    const errorMsg = data?.detail || data?.message || (typeof data?.raw === 'string' ? data.raw : `HTTP ${res.status}`)
+    const err = new Error(errorMsg)
+    err.status = res.status
+    err.data = data
+    throw err
+  }
+
+  return data
 }

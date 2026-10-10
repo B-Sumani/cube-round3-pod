@@ -591,3 +591,80 @@ def test_non_sample_same_request_twice_gives_same_record_id_and_content_hash(tmp
     assert out1["evidence"]["content_hash"] == out2["evidence"]["content_hash"]
     assert verify(out1["evidence"])
     assert verify(out2["evidence"])
+
+
+def test_pack_dev_units_schema_valid():
+    """Verify Pack executes on our dev units producing schema-valid output."""
+    client = client_for("pack")
+    dev_cases = [
+        {"org_id": "org_demo_alpha", "unit_id": "UNIT-0010"},
+        {"org_demo_bravo": "org_demo_bravo", "unit_id": "UNIT-0012", "org_id": "org_demo_bravo"},
+        {"org_id": "org_demo_alpha", "unit_id": "UNIT-0020"},
+    ]
+    for case in dev_cases:
+        req = {
+            "schema_version": "1.0",
+            "request_id": f"REQ-DEV-{case['unit_id']}-pack",
+            "workflow_id": f"WF-{case['org_id']}-{case['unit_id']}",
+            "stage": "pack",
+            "subject": {"org_id": case["org_id"], "subject_id": case["unit_id"], "route": "mfn"},
+            "inputs": [],
+            "previous_evidence": [],
+            "context": {"channel": "amazon_mfn"},
+        }
+        out = client.run(req, 30)
+        assert errors("agent-output", out) == [], f"Schema validation failed for {case['unit_id']}"
+        ev = out["evidence"]
+        assert errors("evidence", ev) == []
+        assert verify(ev), f"Content hash invalid for {case['unit_id']}"
+        assert out["stage"] == "pack"
+        assert out["agent_id"] == "pack-manager@1.0.0"
+        assert PCK_ID_REGEX.match(ev["record_id"])
+        assert out["verdict"] == ev["decision"]["verdict"]
+        assert out["status"] == ev["status"]
+
+
+def test_pack_dev_units_wrong_tenant_refusal():
+    """Asking for a dev unit under another org must be refused with AgentRejected."""
+    client = client_for("pack")
+    # UNIT-0010 belongs to org_demo_alpha in dev data; asking under org_demo_bravo must reject
+    req1 = {
+        "schema_version": "1.0",
+        "request_id": "REQ-DEV-WRONG-TENANT-1",
+        "workflow_id": "WF-bravo-UNIT-0010",
+        "stage": "pack",
+        "subject": {"org_id": "org_demo_bravo", "subject_id": "UNIT-0010", "route": "mfn"},
+        "inputs": [],
+        "previous_evidence": [],
+        "context": {},
+    }
+    with pytest.raises(AgentRejected):
+        client.run(req1, 30)
+
+    # UNIT-0012 belongs to org_demo_bravo in dev data; asking under org_demo_alpha must reject
+    req2 = {
+        "schema_version": "1.0",
+        "request_id": "REQ-DEV-WRONG-TENANT-2",
+        "workflow_id": "WF-alpha-UNIT-0012",
+        "stage": "pack",
+        "subject": {"org_id": "org_demo_alpha", "subject_id": "UNIT-0012", "route": "mfn"},
+        "inputs": [],
+        "previous_evidence": [],
+        "context": {},
+    }
+    with pytest.raises(AgentRejected):
+        client.run(req2, 30)
+
+    # UNIT-0024 belongs to org_demo_alpha in dev data; asking under org_demo_bravo must reject
+    req3 = {
+        "schema_version": "1.0",
+        "request_id": "REQ-DEV-WRONG-TENANT-3",
+        "workflow_id": "WF-bravo-UNIT-0024",
+        "stage": "pack",
+        "subject": {"org_id": "org_demo_bravo", "subject_id": "UNIT-0024", "route": "mfn"},
+        "inputs": [],
+        "previous_evidence": [],
+        "context": {},
+    }
+    with pytest.raises(AgentRejected):
+        client.run(req3, 30)

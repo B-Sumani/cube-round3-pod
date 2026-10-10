@@ -6,7 +6,7 @@ import CheckTable from '../components/CheckTable'
 import VerdictBadge from '../components/VerdictBadge'
 import ErrorBanner from '../components/ErrorBanner'
 import { AGENTS } from '../data/agents'
-import { createWorkflow, getWorkflowEvidence } from '../api/client'
+import { createWorkflow, getWorkflowEvidence, getCatalogue, runStageUpload } from '../api/client'
 import { formatCurrency, formatTimestamp, truncateHash } from '../lib/format'
 import {
   Play,
@@ -22,7 +22,86 @@ import {
   ShieldAlert,
   Info,
   Layers,
+  Package,
+  Barcode,
+  Plus,
+  Minus,
+  Loader2,
 } from 'lucide-react'
+
+// Client-side image resize & compression to under 3 MB (Vercel serverless limit)
+async function compressImageFile(file, maxBytes = 3 * 1024 * 1024) {
+  const allowed = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp']
+  const ext = (file.name || '').split('.').pop().toLowerCase()
+  if (!allowed.includes(file.type) && !['jpg', 'jpeg', 'png', 'webp'].includes(ext)) {
+    throw new Error(`Unsupported file type: "${file.name}". Allowed formats: JPG, PNG, WebP.`)
+  }
+
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(new Error('Failed to read image file.'))
+    reader.onload = (event) => {
+      const img = new Image()
+      img.onerror = () => reject(new Error('Could not parse image. Please select a valid image.'))
+      img.onload = () => {
+        const canvas = document.createElement('canvas')
+        let width = img.width
+        let height = img.height
+        const maxDim = 1920
+
+        if (width > maxDim || height > maxDim) {
+          if (width > height) {
+            height = Math.round((height * maxDim) / width)
+            width = maxDim
+          } else {
+            width = Math.round((width * maxDim) / height)
+            height = maxDim
+          }
+        }
+
+        canvas.width = width
+        canvas.height = height
+        const ctx = canvas.getContext('2d')
+        ctx.drawImage(img, 0, 0, width, height)
+
+        let quality = 0.90
+        const exportMime = file.type === 'image/png' ? 'image/jpeg' : (file.type || 'image/jpeg')
+
+        const tryBlob = (q) => {
+          canvas.toBlob(
+            (blob) => {
+              if (!blob) {
+                reject(new Error('Canvas image conversion failed.'))
+                return
+              }
+              if (blob.size <= maxBytes || q <= 0.3) {
+                if (blob.size > maxBytes) {
+                  reject(new Error(`Image exceeds 3 MB limit even after compression (${(blob.size / (1024 * 1024)).toFixed(2)} MB). Please select a smaller photo.`))
+                  return
+                }
+                const newExt = exportMime === 'image/webp' ? '.webp' : '.jpg'
+                const outName = file.name.replace(/\.[^/.]+$/, '') + newExt
+                const compressed = new File([blob], outName, {
+                  type: exportMime,
+                  lastModified: Date.now(),
+                })
+                resolve(compressed)
+              } else {
+                tryBlob(q - 0.15)
+              }
+            },
+            exportMime,
+            q
+          )
+        }
+
+        tryBlob(quality)
+      }
+      img.src = event.target.result
+    }
+    reader.readAsDataURL(file)
+  })
+}
 
 export default function AgentDetailPage() {
   const { stage } = useParams()
@@ -38,8 +117,12 @@ export default function AgentDetailPage() {
   // Discovered Order Lines / SKUs from runs
   const [discoveredRefs, setDiscoveredRefs] = useState(null)
 
-  // Local image previews (never sent to API)
+  // Local image previews & upload state
   const [uploadedImages, setUploadedImages] = useState([])
+  const [selectedUploadFile, setSelectedUploadFile] = useState(null)
+  const [uploadFilePreview, setUploadFilePreview] = useState(null)
+  const [uploadCompressing, setUploadCompressing] = useState(false)
+  const [uploadError, setUploadError] = useState(null)
 
   // Execution State for "Check"
   const [loading, setLoading] = useState(false)
@@ -52,6 +135,32 @@ export default function AgentDetailPage() {
   const [searchResult, setSearchResult] = useState(null)
   const [searchError, setSearchError] = useState(null)
 
+  // Catalogue & Order Builder State (Pack Manager)
+  const [catalogue, setCatalogue] = useState([])
+  const [catalogueLoading, setCatalogueLoading] = useState(false)
+  const [catalogueError, setCatalogueError] = useState(null)
+  const [catalogueSearch, setCatalogueSearch] = useState('')
+  const [orderQuantities, setOrderQuantities] = useState({})
+
+  // Fetch catalogue for Pack Manager
+  useEffect(() => {
+    if (stage === 'pack') {
+      setCatalogueLoading(true)
+      setCatalogueError(null)
+      getCatalogue(org)
+        .then((items) => {
+          setCatalogue(Array.isArray(items) ? items : [])
+        })
+        .catch((err) => {
+          console.warn('Catalogue load error:', err)
+          setCatalogueError(err.message || 'Could not load catalogue')
+        })
+        .finally(() => {
+          setCatalogueLoading(false)
+        })
+    }
+  }, [stage, org])
+
   // Clear all displayed workflow results and evidence when tenant org changes
   useEffect(() => {
     setCheckResult(null)
@@ -59,7 +168,43 @@ export default function AgentDetailPage() {
     setSearchResult(null)
     setSearchError(null)
     setDiscoveredRefs(null)
+    setOrderQuantities({})
   }, [org])
+
+  const updateQuantity = (sku, delta) => {
+    setOrderQuantities((prev) => {
+      const cur = prev[sku] || 0
+      const next = Math.max(0, cur + delta)
+      if (next === 0) {
+        const copy = { ...prev }
+        delete copy[sku]
+        return copy
+      }
+      return { ...prev, [sku]: next }
+    })
+  }
+
+  const clearOrderLines = () => {
+    setOrderQuantities({})
+  }
+
+  const builtOrderLines = Object.entries(orderQuantities)
+    .filter(([_, q]) => q > 0)
+    .map(([s, q]) => `${s}:${q}`)
+    .join(';')
+
+  const filteredCatalogue = catalogue.filter((item) => {
+    if (!catalogueSearch.trim()) return true
+    const q = catalogueSearch.toLowerCase()
+    return (
+      (item.sku && item.sku.toLowerCase().includes(q)) ||
+      (item.title && item.title.toLowerCase().includes(q)) ||
+      (item.name && item.name.toLowerCase().includes(q)) ||
+      (item.description && item.description.toLowerCase().includes(q)) ||
+      (item.packaging_type && item.packaging_type.toLowerCase().includes(q)) ||
+      (item.barcode && item.barcode.toLowerCase().includes(q))
+    )
+  })
 
   if (!agent) {
     return (
@@ -80,22 +225,80 @@ export default function AgentDetailPage() {
     )
   }
 
-  // Handle local image file selection
-  const handleImageChange = (e) => {
-    const files = Array.from(e.target.files || [])
-    if (files.length === 0) return
+  // Handle local image file selection and client-side compression
+  const handleImageChange = async (e) => {
+    const file = e.target.files?.[0]
+    if (!file) return
 
-    const newPreviews = files.map((file) => ({
-      name: file.name,
-      size: (file.size / 1024).toFixed(1) + ' KB',
-      url: URL.createObjectURL(file),
-    }))
+    setUploadError(null)
+    setUploadCompressing(true)
 
-    setUploadedImages((prev) => [...prev, ...newPreviews])
+    try {
+      const compressed = await compressImageFile(file)
+      setSelectedUploadFile(compressed)
+      const prevUrl = URL.createObjectURL(compressed)
+      setUploadFilePreview({
+        name: compressed.name,
+        originalSize: (file.size / (1024 * 1024)).toFixed(2) + ' MB',
+        compressedSize: (compressed.size / (1024 * 1024)).toFixed(2) + ' MB',
+        url: prevUrl,
+      })
+    } catch (err) {
+      setUploadError(err.message || 'Image processing failed')
+      setSelectedUploadFile(null)
+      setUploadFilePreview(null)
+    } finally {
+      setUploadCompressing(false)
+    }
+  }
+
+  const handleClearUpload = () => {
+    setSelectedUploadFile(null)
+    setUploadFilePreview(null)
+    setUploadError(null)
   }
 
   const handleRemoveImage = (index) => {
     setUploadedImages((prev) => prev.filter((_, i) => i !== index))
+  }
+
+  // Execute Agent on Uploaded Image via POST /stages/{stage}/run-upload
+  const handleRunUpload = async (e) => {
+    if (e && e.preventDefault) e.preventDefault()
+    if (!selectedUploadFile) return
+    if (!unitId.trim()) return
+
+    setLoading(true)
+    setError(null)
+    setUploadError(null)
+    setCheckResult(null)
+
+    try {
+      const res = await runStageUpload({
+        stage,
+        file: selectedUploadFile,
+        unit_id: unitId.trim(),
+        org_id: org,
+        order_lines: stage === 'pack' && builtOrderLines ? builtOrderLines : undefined,
+        route: route !== 'auto' ? route : (stage === 'pack' ? 'mfn' : undefined),
+      })
+
+      if (res.workflow && res.evidence) {
+        recordWorkflowRun(res.workflow, { [res.evidence.record_id]: res.evidence })
+      }
+
+      setCheckResult({
+        workflow: res.workflow,
+        stageResult: res.stage_result,
+        evidence: res.evidence,
+        isAdHocUpload: true,
+        storageNote: res.storage_note,
+      })
+    } catch (err) {
+      setError(err)
+    } finally {
+      setLoading(false)
+    }
   }
 
   // Execute "Check" via orchestrator POST /workflows
@@ -111,8 +314,9 @@ export default function AgentDetailPage() {
       const payload = {
         org_id: org,
         unit_id: unitId.trim(),
-        route: route !== 'auto' ? route : undefined,
+        route: route !== 'auto' ? route : (stage === 'pack' ? 'mfn' : undefined),
         returned: returned === 'auto' ? undefined : returned === 'true',
+        order_lines: stage === 'pack' && builtOrderLines ? builtOrderLines : undefined,
       }
 
       const runWf = await createWorkflow(payload)
@@ -302,95 +506,328 @@ export default function AgentDetailPage() {
                 </div>
               </div>
 
-              {/* Read-only Display of Order Lines / SKUs */}
-              <div className="p-4 rounded-xl border border-ink/20 bg-stone-50">
-                <span className="text-xs font-bold uppercase tracking-wider text-muted block mb-2">
-                  Order Lines & SKU Manifest (Read-Only)
-                </span>
-                {discoveredRefs ? (
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs font-mono">
-                    {discoveredRefs.sku && (
-                      <div>
-                        <span className="text-muted block text-[10px]">SKU:</span>
-                        <strong className="text-ink">{discoveredRefs.sku}</strong>
+              {/* Product Catalogue & Order Builder (Pack Manager) vs Read-only Display (Other stages) */}
+              {stage === 'pack' ? (
+                <div className="p-5 rounded-xl border-2 border-ink/30 bg-stone-50 space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <div className="flex items-center gap-2 mb-0.5">
+                        <Package size={16} className="text-ink" />
+                        <span className="font-mono text-xs font-bold uppercase tracking-wider text-muted">
+                          Product Catalogue & Order Builder ({org})
+                        </span>
                       </div>
-                    )}
-                    {discoveredRefs.asin && (
-                      <div>
-                        <span className="text-muted block text-[10px]">ASIN:</span>
-                        <strong className="text-ink">{discoveredRefs.asin}</strong>
-                      </div>
-                    )}
-                    {(discoveredRefs.po_number || discoveredRefs.order_id) && (
-                      <div>
-                        <span className="text-muted block text-[10px]">PO / Order:</span>
-                        <strong className="text-ink">{discoveredRefs.po_number || discoveredRefs.order_id}</strong>
-                      </div>
-                    )}
-                    {discoveredRefs.po_line && (
-                      <div>
-                        <span className="text-muted block text-[10px]">PO Line:</span>
-                        <strong className="text-ink">{discoveredRefs.po_line}</strong>
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <p className="text-xs text-muted italic">
-                    Order lines and SKUs will appear here after running a check on this unit.
-                  </p>
-                )}
-              </div>
+                      <h4 className="font-serif text-lg font-bold text-ink">
+                        Pick Order SKUs to Match Box Contents
+                      </h4>
+                    </div>
 
-              {/* Image Upload Area with VISIBLE PREVIEW-ONLY DISCLAIMER */}
-              <div className="p-4 rounded-xl border-2 border-dashed border-ink/30 bg-cream/30 space-y-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <ImageIcon size={18} className="text-ink" />
-                    <span className="text-xs font-bold uppercase tracking-wider text-ink">
-                      Visual Reference Upload
-                    </span>
-                  </div>
-
-                  <label className="btn-secondary text-xs py-1.5 px-3 cursor-pointer inline-flex items-center gap-1.5">
-                    <Upload size={14} />
-                    <span>Choose Images</span>
-                    <input
-                      type="file"
-                      multiple
-                      accept="image/*"
-                      onChange={handleImageChange}
-                      className="hidden"
-                    />
-                  </label>
-                </div>
-
-                {/* Mandatory Disclaimer Label */}
-                <div className="p-3 rounded-lg border border-amber-600/30 bg-amber-50/80 text-xs text-amber-900 flex items-start gap-2">
-                  <Info size={16} className="shrink-0 text-amber-700 mt-0.5" />
-                  <p className="leading-relaxed font-medium">
-                    Preview only. Images are not sent to the agent: the orchestrator uses the captures it already holds for the unit.
-                  </p>
-                </div>
-
-                {/* Thumbnail Previews */}
-                {uploadedImages.length > 0 && (
-                  <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-6 gap-3 pt-2">
-                    {uploadedImages.map((img, idx) => (
-                      <div key={idx} className="relative group rounded-lg overflow-hidden border border-ink/30 bg-white">
-                        <img src={img.url} alt={img.name} className="w-full h-20 object-cover" />
-                        <div className="p-1 text-[10px] truncate font-mono text-muted bg-stone-50 border-t border-ink/10">
-                          {img.name}
-                        </div>
+                    {/* Search Input */}
+                    <div className="relative w-full sm:w-64">
+                      <Search size={14} className="absolute left-3 top-2.5 text-muted pointer-events-none" />
+                      <input
+                        type="text"
+                        value={catalogueSearch}
+                        onChange={(e) => setCatalogueSearch(e.target.value)}
+                        placeholder="Search SKU, name, barcode..."
+                        className="w-full pl-8 pr-7 py-1.5 border border-ink/30 rounded-lg text-xs font-mono bg-white focus:outline-none"
+                      />
+                      {catalogueSearch && (
                         <button
                           type="button"
-                          onClick={() => handleRemoveImage(idx)}
-                          className="absolute top-1 right-1 p-0.5 rounded-full bg-ink text-white opacity-0 group-hover:opacity-100 transition-opacity"
-                          aria-label="Remove image"
+                          onClick={() => setCatalogueSearch('')}
+                          className="absolute right-2 top-2 text-muted hover:text-ink text-xs"
                         >
                           <X size={12} />
                         </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <p className="text-xs text-muted">
+                    Build the expected order manifest from your seller catalogue. The Pack Manager checks the open carton photo against these items, verifying presence, counts, and flagging extra items.
+                  </p>
+
+                  {/* Catalogue Table */}
+                  {catalogueLoading ? (
+                    <div className="p-6 text-center text-xs text-muted font-mono">
+                      Loading product catalogue for {org}...
+                    </div>
+                  ) : catalogueError ? (
+                    <div className="p-3 rounded-lg border border-[#D64545]/30 bg-[#D64545]/10 text-xs text-[#A02222]">
+                      {catalogueError}
+                    </div>
+                  ) : filteredCatalogue.length === 0 ? (
+                    <div className="p-4 text-center text-xs text-muted italic">
+                      No products found matching "{catalogueSearch}".
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto border border-ink/20 rounded-xl bg-white max-h-72 overflow-y-auto">
+                      <table className="w-full text-left text-xs">
+                        <thead className="bg-stone-100 border-b border-ink/20 font-bold uppercase text-[10px] text-muted tracking-wider sticky top-0">
+                          <tr>
+                            <th className="py-2.5 px-3">SKU</th>
+                            <th className="py-2.5 px-3">Product Name & Details</th>
+                            <th className="py-2.5 px-3">Expected Packaging</th>
+                            <th className="py-2.5 px-3">Barcode</th>
+                            <th className="py-2.5 px-3">Hazmat</th>
+                            <th className="py-2.5 px-3 text-right">Order Qty</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-ink/10 font-mono">
+                          {filteredCatalogue.map((item) => {
+                            const qty = orderQuantities[item.sku] || 0
+                            return (
+                              <tr key={item.sku} className={`hover:bg-cream/40 transition-colors ${qty > 0 ? 'bg-cream/20' : ''}`}>
+                                <td className="py-2 px-3 font-bold text-ink whitespace-nowrap">
+                                  {item.sku}
+                                </td>
+                                <td className="py-2 px-3 font-sans">
+                                  <div className="font-bold text-ink">{item.title || item.name}</div>
+                                  <div className="text-[11px] text-muted line-clamp-1">{item.description}</div>
+                                </td>
+                                <td className="py-2 px-3 whitespace-nowrap">
+                                  <span className="px-2 py-0.5 rounded border border-ink/20 bg-stone-100 text-[10px] uppercase font-bold text-ink">
+                                    {item.expected_packaging || item.packaging_type || 'standard'}
+                                  </span>
+                                </td>
+                                <td className="py-2 px-3 text-muted text-[11px] whitespace-nowrap">
+                                  {item.barcode || `BAR-${item.sku}`}
+                                </td>
+                                <td className="py-2 px-3 whitespace-nowrap">
+                                  {item.hazmat ? (
+                                    <span className="px-1.5 py-0.5 rounded bg-amber-100 border border-amber-300 text-amber-900 text-[10px] font-bold">
+                                      HAZMAT
+                                    </span>
+                                  ) : (
+                                    <span className="text-[10px] text-muted font-sans">No</span>
+                                  )}
+                                </td>
+                                <td className="py-2 px-3 text-right whitespace-nowrap">
+                                  <div className="inline-flex items-center gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => updateQuantity(item.sku, -1)}
+                                      disabled={qty === 0}
+                                      className="w-6 h-6 rounded border border-ink/30 bg-stone-50 hover:bg-stone-200 disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center font-bold text-ink"
+                                    >
+                                      -
+                                    </button>
+                                    <span className="w-6 text-center font-bold text-xs text-ink">{qty}</span>
+                                    <button
+                                      type="button"
+                                      onClick={() => updateQuantity(item.sku, 1)}
+                                      className="w-6 h-6 rounded border border-ink/30 bg-stone-50 hover:bg-stone-200 flex items-center justify-center font-bold text-ink"
+                                    >
+                                      +
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            )
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+
+                  {/* Selected Order Summary */}
+                  <div className="p-3 rounded-lg border border-ink/20 bg-white space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[11px] font-bold uppercase tracking-wider text-muted">
+                          Selected Order Lines:
+                        </span>
+                        <span className="font-mono text-xs font-bold text-ink">
+                          {builtOrderLines || <span className="text-muted italic font-normal">None selected (default order lines will be used)</span>}
+                        </span>
                       </div>
-                    ))}
+                      {builtOrderLines && (
+                        <button
+                          type="button"
+                          onClick={clearOrderLines}
+                          className="text-xs text-red-600 hover:text-red-800 font-semibold"
+                        >
+                          Clear Selection
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Chips for Selected SKUs */}
+                    {Object.keys(orderQuantities).length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 pt-1">
+                        {Object.entries(orderQuantities).map(([sku, qty]) => (
+                          <span
+                            key={sku}
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-ink/30 bg-cream text-xs font-mono font-bold text-ink"
+                          >
+                            <span>{sku}: {qty}</span>
+                            <button
+                              type="button"
+                              onClick={() => updateQuantity(sku, -qty)}
+                              className="hover:text-red-700"
+                              aria-label={`Remove ${sku}`}
+                            >
+                              <X size={12} />
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                /* Read-only Display of Order Lines / SKUs for other stages */
+                <div className="p-4 rounded-xl border border-ink/20 bg-stone-50">
+                  <span className="text-xs font-bold uppercase tracking-wider text-muted block mb-2">
+                    Order Lines & SKU Manifest (Read-Only)
+                  </span>
+                  {discoveredRefs ? (
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs font-mono">
+                      {discoveredRefs.sku && (
+                        <div>
+                          <span className="text-muted block text-[10px]">SKU:</span>
+                          <strong className="text-ink">{discoveredRefs.sku}</strong>
+                        </div>
+                      )}
+                      {discoveredRefs.asin && (
+                        <div>
+                          <span className="text-muted block text-[10px]">ASIN:</span>
+                          <strong className="text-ink">{discoveredRefs.asin}</strong>
+                        </div>
+                      )}
+                      {(discoveredRefs.po_number || discoveredRefs.order_id) && (
+                        <div>
+                          <span className="text-muted block text-[10px]">PO / Order:</span>
+                          <strong className="text-ink">{discoveredRefs.po_number || discoveredRefs.order_id}</strong>
+                        </div>
+                      )}
+                      {discoveredRefs.po_line && (
+                        <div>
+                          <span className="text-muted block text-[10px]">PO Line:</span>
+                          <strong className="text-ink">{discoveredRefs.po_line}</strong>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-muted italic">
+                      Order lines and SKUs will appear here after running a check on this unit.
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {/* Visual Reference Image Upload & Ephemeral Run Control */}
+              <div className="p-4 rounded-xl border-2 border-dashed border-ink/30 bg-cream/30 space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <ImageIcon size={18} className="text-ink" />
+                    <div>
+                      <span className="text-xs font-bold uppercase tracking-wider text-ink block">
+                        Visual Reference Upload
+                      </span>
+                      <span className="text-[11px] text-muted">
+                        Upload custom carton/unit photo (JPG, PNG, WebP)
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <label className="btn-secondary text-xs py-1.5 px-3 cursor-pointer inline-flex items-center gap-1.5">
+                      <Upload size={14} />
+                      <span>{uploadCompressing ? 'Compressing...' : 'Choose Image'}</span>
+                      <input
+                        type="file"
+                        accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
+                        onChange={handleImageChange}
+                        disabled={uploadCompressing || loading}
+                        className="hidden"
+                      />
+                    </label>
+
+                    {selectedUploadFile && (
+                      <button
+                        type="button"
+                        onClick={handleClearUpload}
+                        className="btn-outline text-xs py-1.5 px-2.5 text-muted hover:text-ink"
+                        title="Discard selected image"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Error Banner if upload/compression fails */}
+                {uploadError && (
+                  <div className="p-3 rounded-lg border border-red-500/30 bg-red-50 text-xs text-red-800 flex items-start gap-2">
+                    <AlertTriangle size={15} className="shrink-0 text-red-600 mt-0.5" />
+                    <div>
+                      <strong>Upload Rejected:</strong> {uploadError}
+                    </div>
+                  </div>
+                )}
+
+                {/* Selected Image Preview with Compression Stats & Run Trigger */}
+                {uploadFilePreview && (
+                  <div className="p-3 rounded-lg border border-ink/20 bg-white space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div className="flex items-center gap-3">
+                        <img
+                          src={uploadFilePreview.url}
+                          alt={uploadFilePreview.name}
+                          className="w-16 h-16 rounded object-cover border border-ink/20 shrink-0"
+                        />
+                        <div className="space-y-1">
+                          <div className="font-mono text-xs font-bold text-ink truncate max-w-xs">
+                            {uploadFilePreview.name}
+                          </div>
+                          <div className="flex items-center gap-2 text-[11px] font-mono text-muted">
+                            <span>Orig: {uploadFilePreview.originalSize}</span>
+                            <span>&rarr;</span>
+                            <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-800 font-bold">
+                              Compressed: {uploadFilePreview.compressedSize} (&lt; 3 MB)
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={handleRunUpload}
+                        disabled={loading || uploadCompressing}
+                        className="btn-primary text-xs py-2 px-4 inline-flex items-center gap-1.5 shrink-0"
+                      >
+                        {loading ? (
+                          <>
+                            <Loader2 size={14} className="animate-spin" />
+                            <span>Processing...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Play size={14} className="fill-ink" />
+                            <span>Run {agent.name} on Uploaded Image</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+
+                    <div className="text-[11px] text-muted italic flex items-center gap-1 border-t border-ink/10 pt-2">
+                      <Info size={13} className="shrink-0 text-amber-700" />
+                      <span>
+                        Uploaded images are stored in ephemeral storage and will disappear on container restart. The Evidence Record captures the sha256 hash.
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {/* If no upload selected, show instructions */}
+                {!uploadFilePreview && (
+                  <div className="p-3 rounded-lg border border-ink/15 bg-stone-50/70 text-xs text-muted flex items-start gap-2">
+                    <Info size={15} className="shrink-0 text-ink/60 mt-0.5" />
+                    <p className="leading-relaxed">
+                      You can run the agent on an uploaded image (automatically resized and compressed client-side to under 3 MB), or use the button below to run standard orchestrator unit check.
+                    </p>
                   </div>
                 )}
               </div>
@@ -447,6 +884,19 @@ export default function AgentDetailPage() {
                   <VerdictBadge verdict={checkResult.stageResult?.verdict} size="lg" />
                 )}
               </div>
+
+              {/* Ad-Hoc Ephemeral Upload Banner */}
+              {checkResult.isAdHocUpload && (
+                <div className="p-3.5 rounded-lg border border-amber-600/30 bg-amber-50/90 text-amber-950 flex items-start gap-2.5 text-xs">
+                  <AlertTriangle size={16} className="text-amber-700 shrink-0 mt-0.5" />
+                  <div className="space-y-0.5">
+                    <div className="font-bold">Ad-Hoc Ephemeral Run</div>
+                    <p className="text-amber-800 text-[11px] leading-relaxed">
+                      {checkResult.storageNote || 'Uploaded images are stored in ephemeral storage and will disappear on container restart.'} The Evidence Record content-addresses the photo via SHA-256 without persisting raw bytes.
+                    </p>
+                  </div>
+                </div>
+              )}
 
               {/* 7e: If Stage was Skipped, show recorded skip reason */}
               {checkResult.stageResult?.state === 'skipped' && (
@@ -518,6 +968,114 @@ export default function AgentDetailPage() {
                       <strong className="text-sm font-mono text-ink">{checkResult.stageResult.duration_ms ? `${checkResult.stageResult.duration_ms}ms` : 'N/A'}</strong>
                     </div>
                   </div>
+
+                  {/* Order Lines Manifest Comparison (Pack Manager) */}
+                  {stage === 'pack' && (
+                    <div className="p-4 rounded-xl border-2 border-ink/20 bg-stone-50 space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-ink/15 pb-2">
+                        <div className="flex items-center gap-2">
+                          <Package size={16} className="text-ink" />
+                          <h4 className="font-serif text-base font-bold text-ink">
+                            Order Comparison & Verification (Pack Manager)
+                          </h4>
+                        </div>
+                        <span className="text-[11px] font-mono text-muted">
+                          Carton Verification Against Order Lines
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {/* Column A: Expected Order Lines */}
+                        <div className="p-3.5 rounded-lg border border-ink/20 bg-white space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                              Expected Order Lines (Checked Against)
+                            </span>
+                            <span className="text-[10px] font-mono text-muted">
+                              {checkResult.evidence?.subject?.refs?.order_id || 'Order Manifest'}
+                            </span>
+                          </div>
+                          <div className="font-mono text-xs font-bold text-ink bg-stone-100 p-2 rounded border border-ink/10 break-all">
+                            {checkResult.evidence?.payload?.order_lines || builtOrderLines || 'None specified'}
+                          </div>
+
+                          {/* Itemized Expected SKUs */}
+                          <div className="space-y-1.5 pt-1">
+                            {(() => {
+                              const linesStr = checkResult.evidence?.payload?.order_lines || builtOrderLines || ''
+                              if (!linesStr) return <p className="text-xs text-muted italic">No order lines specified.</p>
+                              const parts = linesStr.split(';').map((p) => p.trim()).filter(Boolean)
+                              return parts.map((part) => {
+                                const [sku, qty] = part.split(':')
+                                const catItem = catalogue.find((c) => c.sku === sku)
+                                return (
+                                  <div key={sku} className="flex items-center justify-between text-xs p-2 rounded border border-ink/10 bg-stone-50 font-mono">
+                                    <div className="truncate mr-2">
+                                      <strong className="text-ink">{sku}</strong>
+                                      {catItem && <div className="text-[10px] text-muted font-sans truncate">{catItem.title || catItem.name}</div>}
+                                    </div>
+                                    <div className="text-right shrink-0">
+                                      <span className="px-2 py-0.5 rounded bg-ink/10 text-ink font-bold text-xs">Qty: {qty || 1}</span>
+                                      {catItem?.expected_packaging && (
+                                        <div className="text-[9px] text-muted uppercase tracking-wider mt-0.5">{catItem.expected_packaging}</div>
+                                      )}
+                                    </div>
+                                  </div>
+                                )
+                              })
+                            })()}
+                          </div>
+                        </div>
+
+                        {/* Column B: Observed in Box & Operator Decision */}
+                        <div className="p-3.5 rounded-lg border border-ink/20 bg-white space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                              Observed in Box & Operator Action
+                            </span>
+                            <span className="text-xs font-mono font-bold px-2 py-0.5 rounded border border-ink/20 bg-cream">
+                              Action: {checkResult.evidence?.payload?.operator_action || 'N/A'}
+                            </span>
+                          </div>
+
+                          {/* Observed items */}
+                          {checkResult.evidence?.payload?.observations && checkResult.evidence.payload.observations.length > 0 ? (
+                            <div className="space-y-1.5">
+                              {checkResult.evidence.payload.observations.map((obs, idx) => (
+                                <div key={idx} className="flex items-center justify-between text-xs p-2 rounded border border-ink/10 bg-stone-50 font-mono">
+                                  <div>
+                                    <strong className="text-ink">{obs.sku}</strong>
+                                    <div className="text-[10px] text-muted">
+                                      Conf: {Math.round((obs.count_confidence || 1.0) * 100)}%
+                                    </div>
+                                  </div>
+                                  <span className="px-2 py-0.5 rounded bg-emerald-100 border border-emerald-300 text-emerald-900 font-bold">
+                                    Count: {obs.count}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="p-3 rounded-lg bg-stone-50 border border-ink/10 text-xs text-muted">
+                              {checkResult.evidence?.payload?.error_detail || 'No visual carton observations recorded.'}
+                            </div>
+                          )}
+
+                          {/* Reason codes summary */}
+                          {checkResult.evidence?.payload?.reason_codes && (
+                            <div className="pt-1 text-[11px] font-mono text-muted space-y-1 border-t border-ink/10">
+                              {Object.entries(checkResult.evidence.payload.reason_codes).map(([k, code]) => (
+                                <div key={k} className="flex justify-between">
+                                  <span>{k}:</span>
+                                  <strong className={code === 'OK' ? 'text-emerald-700' : 'text-amber-700'}>{code}</strong>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
                   {/* Individual Checks Table with Verdict, Confidence & Uncertain Reason */}
                   <div>
