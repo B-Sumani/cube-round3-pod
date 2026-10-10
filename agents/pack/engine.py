@@ -557,14 +557,23 @@ def run_pack_pipeline(
 
         # Call vision model adapter: EXACTLY ONE model call per unit with all images
         active_adapter = adapter or get_active_adapter()
+        timeout_budget = float(os.getenv("AI_TIMEOUT_S", os.getenv("PACK_TIMEOUT_BUDGET", str(cfg.total_timeout_budget or 45.0))))
         try:
             observation, latency_ms, model_info = active_adapter.analyze_box(
                 images=[it["bytes"] for it in loaded_images],
                 candidate_skus=candidate_skus,
                 catalogue=dev_catalogue if dev_catalogue is not None else catalogue,
-                timeout_seconds=cfg.total_timeout_budget,
+                timeout_seconds=timeout_budget,
             )
-        except (ModelProviderError, ModelTimeoutError, ModelParsingError, ModelError) as err:
+        except ModelTimeoutError as err:
+            return pending_output(
+                agent_input,
+                code="model_timeout",
+                message="The vision model timed out. Try again or use fewer or smaller photos.",
+                retryable=True,
+                agent_id=AGENT_ID,
+            )
+        except (ModelProviderError, ModelParsingError, ModelError) as err:
             return pending_output(
                 agent_input,
                 code="model_error",

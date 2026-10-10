@@ -312,3 +312,34 @@ _Add entries below._
      - `ReviewPage.jsx` renders tabs ("Pending Review ({pendingCount})" and "Resolved ({resolvedCount})"), cards displaying stage, unit ID, verdict badges, reason, copyable record ID, and dossier inspection workspace.
      - Navigation bar badge reflects `pendingCount` from `useSession()`, automatically refreshing when workflows run or overrides are registered.
      - Responsive down to 360px mobile viewports with 44px tap targets and word-wrapping on record IDs.
+
+### D-127 · Pack Vision Model Timeout, Bounded Retry, Server-Side Resizing, and Error UX
+- Date / Owner: 2026-10-10 / Pod (Pack + UI + Orchestration)
+- Context:
+  - Pack Manager calls the multimodal Gemini vision model to inspect 1-5 open-box photographs against order lines.
+  - Large uncompressed smartphone photos and network latency caused `model_error: Model call timed out: The read operation timed out` with low default timeouts.
+  - Production and serverless environments (Vercel) require robust timeout budgeting, bounded retries on transient errors, bandwidth-conscious image payload preparation, and graceful pending/uncertain fallbacks that feed the Review Queue.
+- Decision:
+  1. **Configurable Timeout Budgeting**:
+     - `AI_TIMEOUT_S` (fallback `PACK_TIMEOUT_BUDGET`, default 45.0s) controls the vision model call deadline.
+  2. **Bounded Retry with Short Backoff**:
+     - Retries model calls exactly once on `TimeoutException`, connection errors, or transient HTTP status codes (429, 500, 502, 503, 504) within the remaining timeout budget.
+     - Never retries on 400, 401, 403, or 404 client errors.
+  3. **Server-Side Downscaling & Single Batched Call**:
+     - The adapter layer (`_prepare_image_for_model`) downscales images exceeding 1280px on their longest side using Pillow, handles EXIF orientation, and compresses to JPEG at quality 80.
+     - All photos are submitted in a single batched model call.
+     - Downscaling is confined strictly to the adapter transport layer: the canonical `inputs` list in the Evidence Record retains the original uploaded file's SHA-256 checksum and ref.
+  4. **Stable Model Identifier**:
+     - Model identifier resolved via `MODEL_NAME` with stable default `gemini-2.5-flash` rather than hardcoded preview aliases.
+  5. **Honest UNCERTAIN & Review Queue Integration**:
+     - Exhausted timeouts catch `ModelTimeoutError` and return `pending_output` with `code="model_timeout"`, `retryable=True`, and message `"The vision model timed out. Try again or use fewer or smaller photos."`
+     - Never fakes a PASS.
+     - Automatically routes into the Tessera Review Queue (`ReviewPage`) under pending reviews with full original input image SHA-256 hashes preserved.
+  6. **Operator UX & Vercel Configuration**:
+     - Pack Manager displays an informative loading banner: *"Inspecting open-box photographs with vision model... This check can take up to a minute when multiple photos or retries are processed."*
+     - Clear error banner with real error message and "Retry Check" action button to immediately re-run with existing inputs.
+     - `vercel.json` configured with `maxDuration: 60` for `services.app` and `functions.main.py`.
+- Consequences:
+  - Eliminates unhandled timeout crashes and uncompressed network bottlenecks.
+  - Preserves forensic audit integrity with original upload SHA-256 hashes.
+  - Operator retains full visibility and retry capability via Review Queue and in-page UX.

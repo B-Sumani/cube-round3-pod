@@ -30,6 +30,7 @@ import {
   Loader2,
   Trash2,
   Camera,
+  RefreshCw,
 } from 'lucide-react'
 
 // Client-side image resize & compression to under 4 MB (Vercel serverless limit)
@@ -786,6 +787,17 @@ export default function AgentDetailPage() {
                   )}
                 </div>
 
+                {/* Loading notice */}
+                {loading && (
+                  <div className="p-3.5 rounded-xl border border-mustard/60 bg-amber-50/90 text-xs text-amber-950 flex items-start gap-2.5">
+                    <Loader2 size={16} className="animate-spin text-amber-700 shrink-0 mt-0.5" />
+                    <div className="space-y-0.5">
+                      <span className="font-bold text-amber-900 block">Inspecting open-box photographs with vision model...</span>
+                      <span className="text-amber-800 text-[11px] block">This check can take up to a minute when multiple photos or retries are processed.</span>
+                    </div>
+                  </div>
+                )}
+
                 {/* Single "Run Pack Check" Button */}
                 <div className="pt-2 flex flex-col sm:flex-row items-center justify-between gap-4">
                   <div className="text-xs text-muted self-start sm:self-center">
@@ -1187,11 +1199,23 @@ export default function AgentDetailPage() {
 
           {/* Error Banner / Wrong-Tenant Refusal */}
           {error && (
-            <ErrorBanner
-              error={error}
-              onDismiss={() => setError(null)}
-              title={error.status === 404 ? 'Cross-Tenant Request Refused' : 'Stage Error'}
-            />
+            <div className="space-y-3">
+              <ErrorBanner
+                error={error}
+                onDismiss={() => setError(null)}
+                title={error.status === 404 ? 'Cross-Tenant Request Refused' : 'Stage Error'}
+              />
+              <div className="flex items-center justify-end">
+                <button
+                  type="button"
+                  onClick={stage === 'pack' ? handleRunPackCheck : handleRunCheck}
+                  className="btn-primary text-xs py-2 px-4 inline-flex items-center gap-2"
+                >
+                  <RefreshCw size={14} />
+                  <span>Retry Check</span>
+                </button>
+              </div>
+            </div>
           )}
 
           {/* Stage Result: SHOWS ONLY THIS AGENT'S RESULT */}
@@ -1225,18 +1249,29 @@ export default function AgentDetailPage() {
                 </div>
               )}
 
-              {/* If Stage Errored, show recorded error code */}
-              {checkResult.stageResult?.state === 'error' && (
+              {/* If Stage Errored, show recorded error code & Retry button */}
+              {(checkResult.stageResult?.state === 'error' || checkResult.stageResult?.error) && (
                 <div className="p-4 rounded-xl border-2 border-[#D64545] bg-[#D64545]/10 text-sm space-y-3">
-                  <div className="flex items-center gap-2 font-bold text-[#A02222]">
-                    <ShieldAlert size={18} />
-                    <span>
-                      {checkResult.stageResult.error?.message?.includes('in org_') ||
-                      checkResult.stageResult.error?.message?.includes('belongs to') ||
-                      checkResult.stageResult.error?.code === 'tenant_mismatch'
-                        ? 'Cross-Tenant Request Refused'
-                        : 'Recorded Stage Error'}
-                    </span>
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <div className="flex items-center gap-2 font-bold text-[#A02222]">
+                      <ShieldAlert size={18} />
+                      <span>
+                        {checkResult.stageResult.error?.message?.includes('in org_') ||
+                        checkResult.stageResult.error?.message?.includes('belongs to') ||
+                        checkResult.stageResult.error?.code === 'tenant_mismatch'
+                          ? 'Cross-Tenant Request Refused'
+                          : 'Recorded Stage Error'}
+                      </span>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={stage === 'pack' ? handleRunPackCheck : (checkResult.isAdHocUpload ? handleRunUpload : handleRunCheck)}
+                      className="btn-primary text-xs py-1.5 px-3 inline-flex items-center gap-1.5"
+                    >
+                      <RefreshCw size={13} />
+                      <span>Retry</span>
+                    </button>
                   </div>
 
                   <div className="space-y-1.5">
@@ -1248,7 +1283,7 @@ export default function AgentDetailPage() {
                     </div>
 
                     {checkResult.stageResult.error?.message && (
-                      <div className="font-mono text-xs p-3 rounded-lg bg-white border border-[#D64545]/40 text-[#A02222]">
+                      <div className="font-mono text-xs p-3 rounded-lg bg-white border border-[#D64545]/40 text-[#A02222] break-anywhere">
                         {checkResult.stageResult.error.message}
                       </div>
                     )}
@@ -1280,20 +1315,31 @@ export default function AgentDetailPage() {
                       <strong className="text-sm font-bold text-[#9A6202] block">
                         Requires Human Review
                       </strong>
-                      <span className="text-xs text-stone-800">
-                        {checkResult.stageResult?.uncertain_reason ||
+                      <span className="text-xs text-stone-800 break-anywhere">
+                        {checkResult.stageResult?.error?.message ||
+                          checkResult.stageResult?.uncertain_reason ||
                           'This stage returned an UNCERTAIN verdict requiring manual inspection and decision.'}
                       </span>
                     </div>
                   </div>
 
-                  <Link
-                    to="/app/review"
-                    className="btn-primary text-xs py-2.5 px-4 shrink-0 flex items-center gap-1.5"
-                  >
-                    <span>Open Review Queue</span>
-                    <ArrowRight size={14} />
-                  </Link>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={stage === 'pack' ? handleRunPackCheck : (checkResult.isAdHocUpload ? handleRunUpload : handleRunCheck)}
+                      className="btn-secondary text-xs py-2 px-3 inline-flex items-center gap-1.5 shrink-0"
+                    >
+                      <RefreshCw size={13} />
+                      <span>Retry</span>
+                    </button>
+                    <Link
+                      to="/app/review"
+                      className="btn-primary text-xs py-2 px-3.5 shrink-0 flex items-center gap-1.5"
+                    >
+                      <span>Open Review Queue</span>
+                      <ArrowRight size={14} />
+                    </Link>
+                  </div>
                 </div>
               )}
             </div>

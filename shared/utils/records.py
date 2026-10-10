@@ -120,10 +120,15 @@ def pending_output(request: dict, *, code: str, message: str, retryable: bool = 
     stage = request["stage"]
     agent_id = agent_id or f"{stage}-agent"
     safe_id = re.sub(r"[^A-Za-z0-9._-]", "-", request["request_id"])
+    req_inputs = request.get("inputs") or []
+    req_payload = {
+        "image_sha256": {it.get("ref"): it.get("sha256") for it in req_inputs if it.get("ref") and it.get("sha256")},
+    } if req_inputs else {}
     record = build_record(
         request, agent_id=agent_id, record_id=f"{PREFIX[stage]}-PENDING-{safe_id}", captured_at=utcnow(), checks=[],
         outcome="pending_review", reason=f"{code}: {message}", model={"name": "none", "version": "0", "calls": 0},
         status="pending" if retryable else "error", verdict="UNCERTAIN", needs_human=True,
+        inputs=req_inputs, payload=req_payload,
         error=error_obj(code, message, retryable=retryable, stage=stage, agent_id=agent_id))
     return build_output(record, next_step="retry" if retryable else "review", reason=message)
 

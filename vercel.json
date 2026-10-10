@@ -4,11 +4,17 @@
     "app": {
       "root": ".",
       "framework": "fastapi",
-      "entrypoint": "main.py"
+      "entrypoint": "main.py",
+      "maxDuration": 60
     },
     "ui": {
       "root": "ui",
       "framework": "vite"
+    }
+  },
+  "functions": {
+    "main.py": {
+      "maxDuration": 60
     }
   },
   "rewrites": [

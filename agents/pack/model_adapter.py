@@ -13,6 +13,7 @@ Follows Round 3 constraints:
 from __future__ import annotations
 
 import base64
+import io
 import logging
 import os
 import time
@@ -20,6 +21,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
+from PIL import Image
 
 from agents.pack.catalogue import format_prompt_candidate_list
 from agents.pack.parser import (
@@ -120,6 +122,42 @@ def _detect_image_mime(data: bytes) -> str:
     return "image/jpeg"
 
 
+def _prepare_image_for_model(img_bytes: bytes, max_dim: int = 1280, quality: int = 80) -> Tuple[bytes, str]:
+    """Downscales image to a maximum of max_dim on the longest side and re-encodes as JPEG at quality ~80.
+
+    Returns (prepared_bytes, mime_type).
+    If the image cannot be opened/parsed by PIL, returns (original_bytes, _detect_image_mime(original_bytes)).
+    """
+    if not img_bytes:
+        return img_bytes, "image/jpeg"
+    try:
+        with Image.open(io.BytesIO(img_bytes)) as img:
+            try:
+                from PIL import ImageOps
+                img = ImageOps.exif_transpose(img)
+            except Exception:
+                pass
+
+            if img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")
+            elif img.mode == "L":
+                img = img.convert("RGB")
+
+            width, height = img.size
+            if max(width, height) > max_dim:
+                scale = max_dim / float(max(width, height))
+                new_width = max(1, int(round(width * scale)))
+                new_height = max(1, int(round(height * scale)))
+                img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+            out_io = io.BytesIO()
+            img.save(out_io, format="JPEG", quality=quality, optimize=True)
+            return out_io.getvalue(), "image/jpeg"
+    except Exception as exc:
+        logger.warning("Could not resize image for model (%s); sending original bytes", exc)
+        return img_bytes, _detect_image_mime(img_bytes)
+
+
 class GeminiVisionAdapter(VisionModelAdapter):
     """Adapter for Google Gemini Vision models."""
 
@@ -129,12 +167,15 @@ class GeminiVisionAdapter(VisionModelAdapter):
         self,
         api_key: Optional[str] = None,
         model_name: Optional[str] = None,
-        total_timeout_budget: float = 15.0,
-        max_transport_retries: int = 2,
+        total_timeout_budget: Optional[float] = None,
+        max_transport_retries: int = 1,
     ):
         self._api_key = api_key
-        self.model_name = model_name or os.getenv("MODEL_NAME", "gemini-3.1-flash-lite-preview")
-        self.total_timeout_budget = total_timeout_budget
+        self.model_name = model_name or os.getenv("MODEL_NAME", "gemini-2.5-flash")
+        if total_timeout_budget is not None:
+            self.total_timeout_budget = total_timeout_budget
+        else:
+            self.total_timeout_budget = float(os.getenv("AI_TIMEOUT_S", os.getenv("PACK_TIMEOUT_BUDGET", "45.0")))
         self.max_transport_retries = max_transport_retries
 
     def _get_api_key(self) -> str:
@@ -185,11 +226,13 @@ class GeminiVisionAdapter(VisionModelAdapter):
 
         prompt_text = self._build_prompt(candidate_skus or [], catalogue)
         parts: List[Dict[str, Any]] = [{"text": prompt_text}]
+        # Server-side downscaling to max 1280px and JPEG quality ~80, all photos batched in ONE call
         for img_bytes in image_list:
-            image_b64 = base64.b64encode(img_bytes).decode("utf-8")
+            prepared_bytes, mime_type = _prepare_image_for_model(img_bytes, max_dim=1280, quality=80)
+            image_b64 = base64.b64encode(prepared_bytes).decode("utf-8")
             parts.append({
                 "inline_data": {
-                    "mime_type": _detect_image_mime(img_bytes),
+                    "mime_type": mime_type,
                     "data": image_b64,
                 }
             })
@@ -209,12 +252,13 @@ class GeminiVisionAdapter(VisionModelAdapter):
         }
 
         attempts = 0
+        max_attempts = self.max_transport_retries + 1  # 1 retry = 2 attempts total
         last_error: Optional[Exception | str] = None
 
-        while attempts <= self.max_transport_retries:
+        while attempts < max_attempts:
             elapsed = time.monotonic() - start_time
             remaining_time = budget - elapsed
-            if remaining_time <= 0:
+            if remaining_time <= 1.0:
                 raise ModelTimeoutError(
                     f"Model call exceeded timeout budget of {budget:.1f}s after {attempts} attempts"
                 )
@@ -222,15 +266,21 @@ class GeminiVisionAdapter(VisionModelAdapter):
             attempts += 1
             attempt_start = time.monotonic()
 
+            if attempts < max_attempts and remaining_time > 15.0:
+                call_timeout = min(25.0, remaining_time - 5.0)
+            else:
+                call_timeout = max(1.0, remaining_time)
+
             try:
                 logger.info(
-                    "Calling Gemini model %s (attempt %d/%d, budget remaining: %.2fs)",
+                    "Calling Gemini model %s (attempt %d/%d, budget remaining: %.2fs, call timeout: %.2fs)",
                     self.model_name,
                     attempts,
-                    self.max_transport_retries + 1,
+                    max_attempts,
                     remaining_time,
+                    call_timeout,
                 )
-                with httpx.Client(timeout=remaining_time) as client:
+                with httpx.Client(timeout=call_timeout) as client:
                     resp = client.post(url, headers=headers, json=payload)
 
                 attempt_latency = int((time.monotonic() - attempt_start) * 1000)
@@ -258,26 +308,44 @@ class GeminiVisionAdapter(VisionModelAdapter):
 
                 elif resp.status_code in (429, 500, 502, 503, 504):
                     last_error = f"HTTP {resp.status_code}"
-                    if attempts <= self.max_transport_retries:
-                        sleep_time = min(1.0 * attempts, max(0.1, remaining_time))
-                        time.sleep(sleep_time)
-                        continue
+                    logger.warning("Gemini transient HTTP %d on attempt %d/%d", resp.status_code, attempts, max_attempts)
+                    if attempts < max_attempts:
+                        time_left = budget - (time.monotonic() - start_time)
+                        if time_left > 2.0:
+                            time.sleep(min(1.0, max(0.1, time_left - 1.0)))
+                            continue
                     raise ModelProviderError(f"Exhausted retries ({attempts}): {last_error}")
                 else:
-                    raise ModelProviderError(f"Gemini API client error (HTTP {resp.status_code})")
+                    # Non-retryable: 400 (Bad Request), 401/403 (Auth), 404, etc.
+                    error_detail = ""
+                    try:
+                        error_detail = resp.text[:200]
+                    except Exception:
+                        pass
+                    raise ModelProviderError(f"Gemini API client error (HTTP {resp.status_code}): {error_detail}")
 
             except httpx.TimeoutException as te:
                 last_error = te
+                logger.warning("Gemini call timed out on attempt %d/%d: %s", attempts, max_attempts, te)
+                if attempts < max_attempts:
+                    time_left = budget - (time.monotonic() - start_time)
+                    if time_left > 2.0:
+                        time.sleep(min(0.5, max(0.1, time_left - 1.0)))
+                        continue
                 raise ModelTimeoutError(f"Model call timed out: {te}") from te
+
             except httpx.RequestError as re:
                 last_error = re
-                if attempts <= self.max_transport_retries:
-                    time.sleep(min(0.5 * attempts, max(0.1, remaining_time)))
-                    continue
+                logger.warning("Gemini network error on attempt %d/%d: %s", attempts, max_attempts, re)
+                if attempts < max_attempts:
+                    time_left = budget - (time.monotonic() - start_time)
+                    if time_left > 2.0:
+                        time.sleep(min(0.5, max(0.1, time_left - 1.0)))
+                        continue
                 raise ModelProviderError(f"Network request error: {re}") from re
 
         total_latency_ms = int((time.monotonic() - start_time) * 1000)
-        raise ModelProviderError(f"Failed to obtain observation: {last_error}")
+        raise ModelTimeoutError(f"Model call timed out after {attempts} attempts: {last_error}")
 
 
 class MockVisionAdapter(VisionModelAdapter):
@@ -293,10 +361,12 @@ class MockVisionAdapter(VisionModelAdapter):
         mock_observation: Optional[ModelObservation] = None,
         simulate_timeout: bool = False,
         simulate_error: bool = False,
+        timeout_attempts: int = 0,
     ):
         self.mock_observation = mock_observation
         self.simulate_timeout = simulate_timeout
         self.simulate_error = simulate_error
+        self.timeout_attempts = timeout_attempts
         self.call_count = 0
         self.last_candidate_skus: List[str] = []
         self.last_images: List[bytes] = []
@@ -321,7 +391,9 @@ class MockVisionAdapter(VisionModelAdapter):
             self.last_images = []
 
         if self.simulate_timeout:
-            raise ModelTimeoutError("Simulated mock timeout")
+            raise ModelTimeoutError("The read operation timed out")
+        if self.timeout_attempts > 0 and self.call_count <= self.timeout_attempts:
+            raise ModelTimeoutError(f"Simulated mock timeout on attempt {self.call_count}")
         if self.simulate_error:
             raise ModelProviderError("Simulated mock provider error")
 

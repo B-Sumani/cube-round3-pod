@@ -13,15 +13,16 @@ from dataclasses import dataclass
 class PackConfig:
     count_confidence_threshold: float = 0.70
     identity_confidence_threshold: float = 0.75
-    total_timeout_budget: float = 15.0
+    total_timeout_budget: float = 45.0
     version: str = "v1.0.0"
 
     @classmethod
     def from_env(cls) -> PackConfig:
+        timeout = float(os.getenv("AI_TIMEOUT_S", os.getenv("PACK_TIMEOUT_BUDGET", "45.0")))
         return cls(
             count_confidence_threshold=float(os.getenv("CONF_COUNT_THRESHOLD", "0.70")),
             identity_confidence_threshold=float(os.getenv("CONF_IDENTITY_THRESHOLD", "0.75")),
-            total_timeout_budget=float(os.getenv("PACK_TIMEOUT_BUDGET", "15.0")),
+            total_timeout_budget=timeout,
             version=os.getenv("PACK_CONFIG_VERSION", "v1.0.0"),
         )
 

@@ -245,8 +245,13 @@ def review_queue_endpoint(
                 or (rec.get("inputs") and any("uploads/" in str(inp.get("ref", "")) for inp in rec.get("inputs", [])))
             )
 
+            err_obj = rec.get("error") or {}
+            err_code = err_obj.get("code")
+            err_msg = err_obj.get("message")
+            formatted_err = f"{err_code}: {err_msg}" if err_code and err_msg else err_msg
+
             reason = (
-                (rec.get("error") or {}).get("message")
+                formatted_err
                 or rec.get("decision", {}).get("reason")
                 or sr.get("skipped_reason")
                 or (wf.get("status_reason") if wf.get("status") == "BLOCKED" else None)
@@ -300,6 +305,11 @@ def review_queue_endpoint(
                 rec.get("payload", {}).get("ad_hoc_upload")
                 or (rec.get("inputs") and any("uploads/" in str(inp.get("ref", "")) for inp in rec.get("inputs", [])))
             )
+            err_obj = rec.get("error") or {}
+            err_code = err_obj.get("code")
+            err_msg = err_obj.get("message")
+            formatted_err = f"{err_code}: {err_msg}" if err_code and err_msg else err_msg
+
             item = {
                 "id": rec_id,
                 "record_id": rec_id,
@@ -312,7 +322,7 @@ def review_queue_endpoint(
                 "verdict": orig_verdict,
                 "effective_verdict": orig_verdict,
                 "needs_human": orig_needs_human,
-                "reason": (rec.get("error") or {}).get("message") or rec.get("decision", {}).get("reason") or "Requires operator review",
+                "reason": formatted_err or rec.get("decision", {}).get("reason") or "Requires operator review",
                 "is_ad_hoc_upload": is_ad_hoc,
                 "status": "pending",
                 "has_override": False,
