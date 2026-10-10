@@ -6,7 +6,7 @@ import CheckTable from '../components/CheckTable'
 import VerdictBadge from '../components/VerdictBadge'
 import ErrorBanner from '../components/ErrorBanner'
 import { AGENTS } from '../data/agents'
-import { createWorkflow, getWorkflowEvidence } from '../api/client'
+import { createWorkflow, getWorkflowEvidence, getCatalogue } from '../api/client'
 import { formatCurrency, formatTimestamp, truncateHash } from '../lib/format'
 import {
   Play,
@@ -22,6 +22,10 @@ import {
   ShieldAlert,
   Info,
   Layers,
+  Package,
+  Barcode,
+  Plus,
+  Minus,
 } from 'lucide-react'
 
 export default function AgentDetailPage() {
@@ -52,6 +56,32 @@ export default function AgentDetailPage() {
   const [searchResult, setSearchResult] = useState(null)
   const [searchError, setSearchError] = useState(null)
 
+  // Catalogue & Order Builder State (Pack Manager)
+  const [catalogue, setCatalogue] = useState([])
+  const [catalogueLoading, setCatalogueLoading] = useState(false)
+  const [catalogueError, setCatalogueError] = useState(null)
+  const [catalogueSearch, setCatalogueSearch] = useState('')
+  const [orderQuantities, setOrderQuantities] = useState({})
+
+  // Fetch catalogue for Pack Manager
+  useEffect(() => {
+    if (stage === 'pack') {
+      setCatalogueLoading(true)
+      setCatalogueError(null)
+      getCatalogue(org)
+        .then((items) => {
+          setCatalogue(Array.isArray(items) ? items : [])
+        })
+        .catch((err) => {
+          console.warn('Catalogue load error:', err)
+          setCatalogueError(err.message || 'Could not load catalogue')
+        })
+        .finally(() => {
+          setCatalogueLoading(false)
+        })
+    }
+  }, [stage, org])
+
   // Clear all displayed workflow results and evidence when tenant org changes
   useEffect(() => {
     setCheckResult(null)
@@ -59,7 +89,43 @@ export default function AgentDetailPage() {
     setSearchResult(null)
     setSearchError(null)
     setDiscoveredRefs(null)
+    setOrderQuantities({})
   }, [org])
+
+  const updateQuantity = (sku, delta) => {
+    setOrderQuantities((prev) => {
+      const cur = prev[sku] || 0
+      const next = Math.max(0, cur + delta)
+      if (next === 0) {
+        const copy = { ...prev }
+        delete copy[sku]
+        return copy
+      }
+      return { ...prev, [sku]: next }
+    })
+  }
+
+  const clearOrderLines = () => {
+    setOrderQuantities({})
+  }
+
+  const builtOrderLines = Object.entries(orderQuantities)
+    .filter(([_, q]) => q > 0)
+    .map(([s, q]) => `${s}:${q}`)
+    .join(';')
+
+  const filteredCatalogue = catalogue.filter((item) => {
+    if (!catalogueSearch.trim()) return true
+    const q = catalogueSearch.toLowerCase()
+    return (
+      (item.sku && item.sku.toLowerCase().includes(q)) ||
+      (item.title && item.title.toLowerCase().includes(q)) ||
+      (item.name && item.name.toLowerCase().includes(q)) ||
+      (item.description && item.description.toLowerCase().includes(q)) ||
+      (item.packaging_type && item.packaging_type.toLowerCase().includes(q)) ||
+      (item.barcode && item.barcode.toLowerCase().includes(q))
+    )
+  })
 
   if (!agent) {
     return (
@@ -111,8 +177,9 @@ export default function AgentDetailPage() {
       const payload = {
         org_id: org,
         unit_id: unitId.trim(),
-        route: route !== 'auto' ? route : undefined,
+        route: route !== 'auto' ? route : (stage === 'pack' ? 'mfn' : undefined),
         returned: returned === 'auto' ? undefined : returned === 'true',
+        order_lines: stage === 'pack' && builtOrderLines ? builtOrderLines : undefined,
       }
 
       const runWf = await createWorkflow(payload)
@@ -302,44 +369,216 @@ export default function AgentDetailPage() {
                 </div>
               </div>
 
-              {/* Read-only Display of Order Lines / SKUs */}
-              <div className="p-4 rounded-xl border border-ink/20 bg-stone-50">
-                <span className="text-xs font-bold uppercase tracking-wider text-muted block mb-2">
-                  Order Lines & SKU Manifest (Read-Only)
-                </span>
-                {discoveredRefs ? (
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs font-mono">
-                    {discoveredRefs.sku && (
-                      <div>
-                        <span className="text-muted block text-[10px]">SKU:</span>
-                        <strong className="text-ink">{discoveredRefs.sku}</strong>
+              {/* Product Catalogue & Order Builder (Pack Manager) vs Read-only Display (Other stages) */}
+              {stage === 'pack' ? (
+                <div className="p-5 rounded-xl border-2 border-ink/30 bg-stone-50 space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <div className="flex items-center gap-2 mb-0.5">
+                        <Package size={16} className="text-ink" />
+                        <span className="font-mono text-xs font-bold uppercase tracking-wider text-muted">
+                          Product Catalogue & Order Builder ({org})
+                        </span>
                       </div>
-                    )}
-                    {discoveredRefs.asin && (
-                      <div>
-                        <span className="text-muted block text-[10px]">ASIN:</span>
-                        <strong className="text-ink">{discoveredRefs.asin}</strong>
+                      <h4 className="font-serif text-lg font-bold text-ink">
+                        Pick Order SKUs to Match Box Contents
+                      </h4>
+                    </div>
+
+                    {/* Search Input */}
+                    <div className="relative w-full sm:w-64">
+                      <Search size={14} className="absolute left-3 top-2.5 text-muted pointer-events-none" />
+                      <input
+                        type="text"
+                        value={catalogueSearch}
+                        onChange={(e) => setCatalogueSearch(e.target.value)}
+                        placeholder="Search SKU, name, barcode..."
+                        className="w-full pl-8 pr-7 py-1.5 border border-ink/30 rounded-lg text-xs font-mono bg-white focus:outline-none"
+                      />
+                      {catalogueSearch && (
+                        <button
+                          type="button"
+                          onClick={() => setCatalogueSearch('')}
+                          className="absolute right-2 top-2 text-muted hover:text-ink text-xs"
+                        >
+                          <X size={12} />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <p className="text-xs text-muted">
+                    Build the expected order manifest from your seller catalogue. The Pack Manager checks the open carton photo against these items, verifying presence, counts, and flagging extra items.
+                  </p>
+
+                  {/* Catalogue Table */}
+                  {catalogueLoading ? (
+                    <div className="p-6 text-center text-xs text-muted font-mono">
+                      Loading product catalogue for {org}...
+                    </div>
+                  ) : catalogueError ? (
+                    <div className="p-3 rounded-lg border border-[#D64545]/30 bg-[#D64545]/10 text-xs text-[#A02222]">
+                      {catalogueError}
+                    </div>
+                  ) : filteredCatalogue.length === 0 ? (
+                    <div className="p-4 text-center text-xs text-muted italic">
+                      No products found matching "{catalogueSearch}".
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto border border-ink/20 rounded-xl bg-white max-h-72 overflow-y-auto">
+                      <table className="w-full text-left text-xs">
+                        <thead className="bg-stone-100 border-b border-ink/20 font-bold uppercase text-[10px] text-muted tracking-wider sticky top-0">
+                          <tr>
+                            <th className="py-2.5 px-3">SKU</th>
+                            <th className="py-2.5 px-3">Product Name & Details</th>
+                            <th className="py-2.5 px-3">Expected Packaging</th>
+                            <th className="py-2.5 px-3">Barcode</th>
+                            <th className="py-2.5 px-3">Hazmat</th>
+                            <th className="py-2.5 px-3 text-right">Order Qty</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-ink/10 font-mono">
+                          {filteredCatalogue.map((item) => {
+                            const qty = orderQuantities[item.sku] || 0
+                            return (
+                              <tr key={item.sku} className={`hover:bg-cream/40 transition-colors ${qty > 0 ? 'bg-cream/20' : ''}`}>
+                                <td className="py-2 px-3 font-bold text-ink whitespace-nowrap">
+                                  {item.sku}
+                                </td>
+                                <td className="py-2 px-3 font-sans">
+                                  <div className="font-bold text-ink">{item.title || item.name}</div>
+                                  <div className="text-[11px] text-muted line-clamp-1">{item.description}</div>
+                                </td>
+                                <td className="py-2 px-3 whitespace-nowrap">
+                                  <span className="px-2 py-0.5 rounded border border-ink/20 bg-stone-100 text-[10px] uppercase font-bold text-ink">
+                                    {item.expected_packaging || item.packaging_type || 'standard'}
+                                  </span>
+                                </td>
+                                <td className="py-2 px-3 text-muted text-[11px] whitespace-nowrap">
+                                  {item.barcode || `BAR-${item.sku}`}
+                                </td>
+                                <td className="py-2 px-3 whitespace-nowrap">
+                                  {item.hazmat ? (
+                                    <span className="px-1.5 py-0.5 rounded bg-amber-100 border border-amber-300 text-amber-900 text-[10px] font-bold">
+                                      HAZMAT
+                                    </span>
+                                  ) : (
+                                    <span className="text-[10px] text-muted font-sans">No</span>
+                                  )}
+                                </td>
+                                <td className="py-2 px-3 text-right whitespace-nowrap">
+                                  <div className="inline-flex items-center gap-1.5">
+                                    <button
+                                      type="button"
+                                      onClick={() => updateQuantity(item.sku, -1)}
+                                      disabled={qty === 0}
+                                      className="w-6 h-6 rounded border border-ink/30 bg-stone-50 hover:bg-stone-200 disabled:opacity-30 disabled:cursor-not-allowed flex items-center justify-center font-bold text-ink"
+                                    >
+                                      -
+                                    </button>
+                                    <span className="w-6 text-center font-bold text-xs text-ink">{qty}</span>
+                                    <button
+                                      type="button"
+                                      onClick={() => updateQuantity(item.sku, 1)}
+                                      className="w-6 h-6 rounded border border-ink/30 bg-stone-50 hover:bg-stone-200 flex items-center justify-center font-bold text-ink"
+                                    >
+                                      +
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            )
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+
+                  {/* Selected Order Summary */}
+                  <div className="p-3 rounded-lg border border-ink/20 bg-white space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[11px] font-bold uppercase tracking-wider text-muted">
+                          Selected Order Lines:
+                        </span>
+                        <span className="font-mono text-xs font-bold text-ink">
+                          {builtOrderLines || <span className="text-muted italic font-normal">None selected (default order lines will be used)</span>}
+                        </span>
                       </div>
-                    )}
-                    {(discoveredRefs.po_number || discoveredRefs.order_id) && (
-                      <div>
-                        <span className="text-muted block text-[10px]">PO / Order:</span>
-                        <strong className="text-ink">{discoveredRefs.po_number || discoveredRefs.order_id}</strong>
-                      </div>
-                    )}
-                    {discoveredRefs.po_line && (
-                      <div>
-                        <span className="text-muted block text-[10px]">PO Line:</span>
-                        <strong className="text-ink">{discoveredRefs.po_line}</strong>
+                      {builtOrderLines && (
+                        <button
+                          type="button"
+                          onClick={clearOrderLines}
+                          className="text-xs text-red-600 hover:text-red-800 font-semibold"
+                        >
+                          Clear Selection
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Chips for Selected SKUs */}
+                    {Object.keys(orderQuantities).length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 pt-1">
+                        {Object.entries(orderQuantities).map(([sku, qty]) => (
+                          <span
+                            key={sku}
+                            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-ink/30 bg-cream text-xs font-mono font-bold text-ink"
+                          >
+                            <span>{sku}: {qty}</span>
+                            <button
+                              type="button"
+                              onClick={() => updateQuantity(sku, -qty)}
+                              className="hover:text-red-700"
+                              aria-label={`Remove ${sku}`}
+                            >
+                              <X size={12} />
+                            </button>
+                          </span>
+                        ))}
                       </div>
                     )}
                   </div>
-                ) : (
-                  <p className="text-xs text-muted italic">
-                    Order lines and SKUs will appear here after running a check on this unit.
-                  </p>
-                )}
-              </div>
+                </div>
+              ) : (
+                /* Read-only Display of Order Lines / SKUs for other stages */
+                <div className="p-4 rounded-xl border border-ink/20 bg-stone-50">
+                  <span className="text-xs font-bold uppercase tracking-wider text-muted block mb-2">
+                    Order Lines & SKU Manifest (Read-Only)
+                  </span>
+                  {discoveredRefs ? (
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs font-mono">
+                      {discoveredRefs.sku && (
+                        <div>
+                          <span className="text-muted block text-[10px]">SKU:</span>
+                          <strong className="text-ink">{discoveredRefs.sku}</strong>
+                        </div>
+                      )}
+                      {discoveredRefs.asin && (
+                        <div>
+                          <span className="text-muted block text-[10px]">ASIN:</span>
+                          <strong className="text-ink">{discoveredRefs.asin}</strong>
+                        </div>
+                      )}
+                      {(discoveredRefs.po_number || discoveredRefs.order_id) && (
+                        <div>
+                          <span className="text-muted block text-[10px]">PO / Order:</span>
+                          <strong className="text-ink">{discoveredRefs.po_number || discoveredRefs.order_id}</strong>
+                        </div>
+                      )}
+                      {discoveredRefs.po_line && (
+                        <div>
+                          <span className="text-muted block text-[10px]">PO Line:</span>
+                          <strong className="text-ink">{discoveredRefs.po_line}</strong>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-muted italic">
+                      Order lines and SKUs will appear here after running a check on this unit.
+                    </p>
+                  )}
+                </div>
+              )}
 
               {/* Image Upload Area with VISIBLE PREVIEW-ONLY DISCLAIMER */}
               <div className="p-4 rounded-xl border-2 border-dashed border-ink/30 bg-cream/30 space-y-3">
@@ -518,6 +757,114 @@ export default function AgentDetailPage() {
                       <strong className="text-sm font-mono text-ink">{checkResult.stageResult.duration_ms ? `${checkResult.stageResult.duration_ms}ms` : 'N/A'}</strong>
                     </div>
                   </div>
+
+                  {/* Order Lines Manifest Comparison (Pack Manager) */}
+                  {stage === 'pack' && (
+                    <div className="p-4 rounded-xl border-2 border-ink/20 bg-stone-50 space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-ink/15 pb-2">
+                        <div className="flex items-center gap-2">
+                          <Package size={16} className="text-ink" />
+                          <h4 className="font-serif text-base font-bold text-ink">
+                            Order Comparison & Verification (Pack Manager)
+                          </h4>
+                        </div>
+                        <span className="text-[11px] font-mono text-muted">
+                          Carton Verification Against Order Lines
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {/* Column A: Expected Order Lines */}
+                        <div className="p-3.5 rounded-lg border border-ink/20 bg-white space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                              Expected Order Lines (Checked Against)
+                            </span>
+                            <span className="text-[10px] font-mono text-muted">
+                              {checkResult.evidence?.subject?.refs?.order_id || 'Order Manifest'}
+                            </span>
+                          </div>
+                          <div className="font-mono text-xs font-bold text-ink bg-stone-100 p-2 rounded border border-ink/10 break-all">
+                            {checkResult.evidence?.payload?.order_lines || builtOrderLines || 'None specified'}
+                          </div>
+
+                          {/* Itemized Expected SKUs */}
+                          <div className="space-y-1.5 pt-1">
+                            {(() => {
+                              const linesStr = checkResult.evidence?.payload?.order_lines || builtOrderLines || ''
+                              if (!linesStr) return <p className="text-xs text-muted italic">No order lines specified.</p>
+                              const parts = linesStr.split(';').map((p) => p.trim()).filter(Boolean)
+                              return parts.map((part) => {
+                                const [sku, qty] = part.split(':')
+                                const catItem = catalogue.find((c) => c.sku === sku)
+                                return (
+                                  <div key={sku} className="flex items-center justify-between text-xs p-2 rounded border border-ink/10 bg-stone-50 font-mono">
+                                    <div className="truncate mr-2">
+                                      <strong className="text-ink">{sku}</strong>
+                                      {catItem && <div className="text-[10px] text-muted font-sans truncate">{catItem.title || catItem.name}</div>}
+                                    </div>
+                                    <div className="text-right shrink-0">
+                                      <span className="px-2 py-0.5 rounded bg-ink/10 text-ink font-bold text-xs">Qty: {qty || 1}</span>
+                                      {catItem?.expected_packaging && (
+                                        <div className="text-[9px] text-muted uppercase tracking-wider mt-0.5">{catItem.expected_packaging}</div>
+                                      )}
+                                    </div>
+                                  </div>
+                                )
+                              })
+                            })()}
+                          </div>
+                        </div>
+
+                        {/* Column B: Observed in Box & Operator Decision */}
+                        <div className="p-3.5 rounded-lg border border-ink/20 bg-white space-y-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-muted">
+                              Observed in Box & Operator Action
+                            </span>
+                            <span className="text-xs font-mono font-bold px-2 py-0.5 rounded border border-ink/20 bg-cream">
+                              Action: {checkResult.evidence?.payload?.operator_action || 'N/A'}
+                            </span>
+                          </div>
+
+                          {/* Observed items */}
+                          {checkResult.evidence?.payload?.observations && checkResult.evidence.payload.observations.length > 0 ? (
+                            <div className="space-y-1.5">
+                              {checkResult.evidence.payload.observations.map((obs, idx) => (
+                                <div key={idx} className="flex items-center justify-between text-xs p-2 rounded border border-ink/10 bg-stone-50 font-mono">
+                                  <div>
+                                    <strong className="text-ink">{obs.sku}</strong>
+                                    <div className="text-[10px] text-muted">
+                                      Conf: {Math.round((obs.count_confidence || 1.0) * 100)}%
+                                    </div>
+                                  </div>
+                                  <span className="px-2 py-0.5 rounded bg-emerald-100 border border-emerald-300 text-emerald-900 font-bold">
+                                    Count: {obs.count}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div className="p-3 rounded-lg bg-stone-50 border border-ink/10 text-xs text-muted">
+                              {checkResult.evidence?.payload?.error_detail || 'No visual carton observations recorded.'}
+                            </div>
+                          )}
+
+                          {/* Reason codes summary */}
+                          {checkResult.evidence?.payload?.reason_codes && (
+                            <div className="pt-1 text-[11px] font-mono text-muted space-y-1 border-t border-ink/10">
+                              {Object.entries(checkResult.evidence.payload.reason_codes).map(([k, code]) => (
+                                <div key={k} className="flex justify-between">
+                                  <span>{k}:</span>
+                                  <strong className={code === 'OK' ? 'text-emerald-700' : 'text-amber-700'}>{code}</strong>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
                   {/* Individual Checks Table with Verdict, Confidence & Uncertain Reason */}
                   <div>

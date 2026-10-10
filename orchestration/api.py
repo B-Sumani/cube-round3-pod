@@ -111,6 +111,8 @@ def create(body: dict) -> dict:
         raise HTTPException(422, "org_id must match [A-Za-z0-9_]+ and unit_id [A-Za-z0-9][A-Za-z0-9_.-]*")
     case = {"org_id": org, "unit_id": subject, "route": body.get("route") or sample_data.route(subject, org),
             "returned": body.get("returned", sample_data.has("returns", subject, org))}
+    if body.get("order_lines"):
+        case["order_lines"] = str(body["order_lines"]).strip()
     return run_workflow(case, load_flow(FLOW), STORE)
 
 
@@ -158,6 +160,58 @@ def override(workflow_id: str, body: dict, x_org_id: str | None = Header(None), 
                               org_id=org)
     except (ValueError, EvidenceConflict) as exc:
         raise HTTPException(422, str(exc)) from exc
+
+
+@router.get("/catalogue")
+def catalogue_endpoint(x_org_id: str | None = Header(None), org_id: str | None = Query(None)) -> list[dict]:
+    org = _org(x_org_id, org_id)
+    # Tenancy check: verify org is authorized
+    try:
+        from agents.pack.catalogue import get_dev_catalogue
+        cat_map = get_dev_catalogue(org)
+    except LookupError as exc:
+        raise HTTPException(404, str(exc)) from exc
+
+    cat_csv = Path(__file__).resolve().parents[1] / "agents" / "pack" / "data" / "catalogue.csv"
+    rows = []
+    if cat_csv.is_file():
+        import csv
+        with open(cat_csv, newline="", encoding="utf-8") as f:
+            for r in csv.DictReader(f):
+                sku = (r.get("sku") or "").strip()
+                title = (r.get("title") or "").strip()
+                desc = (r.get("description") or "").strip()
+                pkg = r.get("expected_packaging") or r.get("packaging") or (
+                    "bottle" if "bottle" in desc.lower() else ("box" if "box" in desc.lower() or "carton" in desc.lower() else "polybag" if "bag" in desc.lower() else "standard")
+                )
+                barcode = r.get("barcode") or f"BAR-{sku}"
+                hazmat = "hazmat" in desc.lower() or "sanitizer" in desc.lower() or "acid" in desc.lower()
+                rows.append({
+                    "sku": sku,
+                    "name": title,
+                    "title": title,
+                    "description": desc,
+                    "expected_packaging": pkg,
+                    "packaging_type": pkg,
+                    "barcode": barcode,
+                    "hazmat": hazmat,
+                })
+    else:
+        for sku, info in cat_map.items():
+            title = info.get("title", "")
+            desc = info.get("description", "")
+            pkg = "bottle" if "bottle" in desc.lower() else ("box" if "box" in desc.lower() or "carton" in desc.lower() else "standard")
+            rows.append({
+                "sku": sku,
+                "name": title,
+                "title": title,
+                "description": desc,
+                "expected_packaging": pkg,
+                "packaging_type": pkg,
+                "barcode": f"BAR-{sku}",
+                "hazmat": "hazmat" in desc.lower() or "sanitizer" in desc.lower() or "acid" in desc.lower(),
+            })
+    return rows
 
 
 # Include routes at root and with /api prefix

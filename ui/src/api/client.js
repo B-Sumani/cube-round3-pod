@@ -96,13 +96,16 @@ export async function getHealth() {
 
 
 /** Run or advance a workflow case (orchestration/api.py:42-49) */
-export async function createWorkflow({ org_id, unit_id, route, returned }) {
+export async function createWorkflow({ org_id, unit_id, route, returned, order_lines }) {
   const body = { org_id, unit_id }
   if (route && route !== 'auto') {
     body.route = route
   }
   if (typeof returned === 'boolean') {
     body.returned = returned
+  }
+  if (order_lines) {
+    body.order_lines = order_lines
   }
   return request('/workflows', {
     method: 'POST',
@@ -149,4 +152,9 @@ export async function applyOverride(workflowId, { record_id, new_verdict, actor,
     body: JSON.stringify(body),
     orgId: org,
   })
+}
+
+/** Fetch product catalogue for Pack Manager scoped by tenant (orchestration/api.py) */
+export async function getCatalogue(orgId) {
+  return request('/catalogue', { orgId })
 }
