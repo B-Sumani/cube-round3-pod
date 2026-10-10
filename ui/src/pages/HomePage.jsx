@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom'
 import PublicLayout from '../components/PublicLayout'
 import Band from '../components/Band'
 import { AGENTS } from '../data/agents'
-import { BRAND_NAME } from '../config/brand.js'
+import { BRAND_NAME, BRAND_TAGLINE } from '../config/brand.js'
 import {
   ArrowRight,
   Layers,
@@ -65,10 +65,13 @@ export default function HomePage() {
             <span>Multi-Agent Operations Architecture</span>
           </div>
 
-          {/* Platform Name only, no tagline */}
-          <h1 className="font-serif text-5xl md:text-7xl font-bold text-ink tracking-tight mb-6">
+          {/* Platform Name and Tagline */}
+          <h1 className="font-serif text-5xl md:text-7xl font-bold text-ink tracking-tight mb-3">
             {BRAND_NAME}
           </h1>
+          <p className="font-serif italic text-2xl md:text-3xl text-ink/90 font-medium mb-6">
+            {BRAND_TAGLINE}
+          </p>
 
           {/* One-paragraph description */}
           <p className="text-lg md:text-xl text-ink/85 leading-relaxed mb-8 max-w-3xl">

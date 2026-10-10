@@ -159,13 +159,20 @@ export async function getCatalogue(orgId) {
   return request('/catalogue', { orgId })
 }
 
-/** Run an agent stage on an uploaded image file (multipart/form-data) */
-export async function runStageUpload({ stage, file, unit_id, org_id, order_lines, route }) {
+/** Run an agent stage on uploaded image file(s) (multipart/form-data) */
+export async function runStageUpload({ stage, file, files, unit_id, order_id, org_id, order_lines, route }) {
   const url = buildUrl(`/stages/${encodeURIComponent(stage)}/run-upload`)
   const org = org_id || getActiveOrg()
   const formData = new FormData()
-  formData.append('file', file)
+  if (files && files.length > 0) {
+    files.forEach((f) => formData.append('files', f))
+  } else if (file) {
+    formData.append('file', file)
+  }
   formData.append('unit_id', unit_id)
+  if (order_id) {
+    formData.append('order_id', order_id)
+  }
   if (org) {
     formData.append('org_id', org)
   }

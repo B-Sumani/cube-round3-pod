@@ -185,4 +185,83 @@ def test_upload_offline_no_api_key_returns_uncertain(tmp_path, monkeypatch):
     assert ev["decision"]["verdict"] == "UNCERTAIN"
     assert ev["status"] == "error"
     assert ev["error"]["code"] == "model_error"
-    assert "GEMINI_API_KEY" in ev["error"]["message"]
+    assert "Vision key not configured on this server" in ev["error"]["message"]
+
+
+def test_upload_multiple_images_success(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_mod, "STORE", FileStore(tmp_path / "store"))
+    monkeypatch.setenv("UPLOAD_DIR", str(tmp_path / "uploads"))
+    set_test_adapter(FakeVisionAdapter())
+
+    client = TestClient(api_mod.app)
+    img1 = b"\xff\xd8\xff\xe0" + b"ANGLE_ONE" * 10 + b"\xff\xd9"
+    img2 = b"\xff\xd8\xff\xe0" + b"ANGLE_TWO" * 10 + b"\xff\xd9"
+    img3 = b"\xff\xd8\xff\xe0" + b"ANGLE_THREE" * 10 + b"\xff\xd9"
+
+    sha1 = hashlib.sha256(img1).hexdigest()
+    sha2 = hashlib.sha256(img2).hexdigest()
+    sha3 = hashlib.sha256(img3).hexdigest()
+
+    resp = client.post(
+        "/api/stages/pack/run-upload",
+        files=[
+            ("files", ("angle1.jpg", img1, "image/jpeg")),
+            ("files", ("angle2.jpg", img2, "image/jpeg")),
+            ("files", ("angle3.jpg", img3, "image/jpeg")),
+        ],
+        data={
+            "unit_id": "UNIT-0010",
+            "order_id": "ORD-TEST-999",
+            "order_lines": json.dumps([{"sku": "SKU-BEV-001", "qty": 1}]),
+        },
+        headers={"X-Org-Id": "org_demo_alpha"},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    ev = data["evidence"]
+    assert len(ev["inputs"]) == 3
+    assert [inp["sha256"] for inp in ev["inputs"]] == [sha1, sha2, sha3]
+    # Verify order_id recorded in payload
+    assert ev["payload"]["order_id"] == "ORD-TEST-999"
+
+
+def test_upload_too_many_images_rejected(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_mod, "STORE", FileStore(tmp_path / "store"))
+    monkeypatch.setenv("UPLOAD_DIR", str(tmp_path / "uploads"))
+
+    client = TestClient(api_mod.app)
+    img = b"\xff\xd8\xff\xe0" + b"IMG" + b"\xff\xd9"
+
+    # Send 6 images (exceeds max 5)
+    upload_files = [("files", (f"img_{i}.jpg", img, "image/jpeg")) for i in range(6)]
+    resp = client.post(
+        "/api/stages/pack/run-upload",
+        files=upload_files,
+        data={"unit_id": "UNIT-0010"},
+        headers={"X-Org-Id": "org_demo_alpha"},
+    )
+    assert resp.status_code == 422
+    assert "Maximum 5 photographs allowed" in resp.json()["detail"]
+
+
+def test_upload_total_payload_oversize_rejected(tmp_path, monkeypatch):
+    monkeypatch.setattr(api_mod, "STORE", FileStore(tmp_path / "store"))
+    monkeypatch.setenv("UPLOAD_DIR", str(tmp_path / "uploads"))
+
+    client = TestClient(api_mod.app)
+    # 2 images of 2.5 MB each = 5 MB total (exceeds 4.5 MB total limit even though each is <= 4 MB)
+    img1 = b"\xff\xd8\xff\xe0" + b"A" * int(2.5 * 1024 * 1024) + b"\xff\xd9"
+    img2 = b"\xff\xd8\xff\xe0" + b"B" * int(2.5 * 1024 * 1024) + b"\xff\xd9"
+
+    resp = client.post(
+        "/api/stages/pack/run-upload",
+        files=[
+            ("files", ("img1.jpg", img1, "image/jpeg")),
+            ("files", ("img2.jpg", img2, "image/jpeg")),
+        ],
+        data={"unit_id": "UNIT-0010"},
+        headers={"X-Org-Id": "org_demo_alpha"},
+    )
+    assert resp.status_code == 413
+    assert "Total payload size" in resp.json()["detail"]
+

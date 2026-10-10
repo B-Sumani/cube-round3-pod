@@ -1,4 +1,8 @@
-# Cube Buildathon · Round 3 · Pod Integration Build
+# Tessera · Multi-Agent Commerce Operations
+
+**Five agents. One picture. Every decision traced.**
+
+*(Cube Buildathon · Round 3 · Pod Integration Build)*
 
 **Commerce Context stream · Round 3 · Pod build**
 

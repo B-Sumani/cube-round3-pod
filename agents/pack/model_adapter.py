@@ -109,6 +109,17 @@ class VisionModelAdapter(ABC):
         pass
 
 
+def _detect_image_mime(data: bytes) -> str:
+    """Detects MIME type from image magic bytes."""
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    elif data.startswith(b"RIFF") and len(data) >= 12 and data[8:12] == b"WEBP":
+        return "image/webp"
+    elif data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    return "image/jpeg"
+
+
 class GeminiVisionAdapter(VisionModelAdapter):
     """Adapter for Google Gemini Vision models."""
 
@@ -129,7 +140,7 @@ class GeminiVisionAdapter(VisionModelAdapter):
     def _get_api_key(self) -> str:
         key = self._api_key or os.getenv("GEMINI_API_KEY", "")
         if not key or not key.strip() or key.startswith("your_"):
-            raise ModelProviderError("GEMINI_API_KEY is not configured")
+            raise ModelProviderError("Vision key not configured on this server")
         return key.strip()
 
     def _build_prompt(
@@ -137,12 +148,13 @@ class GeminiVisionAdapter(VisionModelAdapter):
     ) -> str:
         sku_list = format_prompt_candidate_list(candidate_skus, catalogue or {})
         return (
-            "You are inspecting a photograph of an open shipping box before it is sealed.\n"
+            "You are inspecting photograph(s) of an open shipping box before it is sealed.\n"
+            "Multiple views are inspected as different angles of the same box. Each physical item must be counted only once across all images.\n"
             "Below is the seller's catalogue of candidate products that may be packed in this box:\n"
             f"{sku_list}\n\n"
             "Instructions:\n"
             "1. Carefully identify which candidate SKUs from the catalogue above are visible in the open box.\n"
-            "2. For each SKU observed, count how many units are visible, report count_confidence (0.0 to 1.0) "
+            "2. For each SKU observed, count how many units are visible across all angles (counting each physical item once), report count_confidence (0.0 to 1.0) "
             "and identity_confidence (0.0 to 1.0), whether it is partially occluded, and its bounding box [ymin, xmin, ymax, xmax].\n"
             "3. If you observe any item in the box that does NOT match any candidate SKU, add it to unrecognised_items "
             "with a description and bounding box.\n"
@@ -177,7 +189,7 @@ class GeminiVisionAdapter(VisionModelAdapter):
             image_b64 = base64.b64encode(img_bytes).decode("utf-8")
             parts.append({
                 "inline_data": {
-                    "mime_type": "image/jpeg",
+                    "mime_type": _detect_image_mime(img_bytes),
                     "data": image_b64,
                 }
             })

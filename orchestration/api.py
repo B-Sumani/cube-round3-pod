@@ -218,6 +218,8 @@ def catalogue_endpoint(x_org_id: str | None = Header(None), org_id: str | None =
 
 
 MAX_UPLOAD_BYTES = int(4.5 * 1024 * 1024)
+MAX_TOTAL_BYTES = MAX_UPLOAD_BYTES
+MAX_FILE_BYTES = 4 * 1024 * 1024
 ALLOWED_UPLOAD_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 ALLOWED_MIME_TYPES = {"image/jpeg", "image/png", "image/webp", "image/jpg", "application/octet-stream"}
 
@@ -233,12 +235,41 @@ def _resolve_upload_dir() -> Path:
     return d
 
 
+def _normalize_order_lines(raw: str | None) -> str:
+    """Normalizes order lines from JSON list/dict or delimited string into a standard string."""
+    if not raw or not raw.strip():
+        return ""
+    text = raw.strip()
+    if (text.startswith("[") and text.endswith("]")) or (text.startswith("{") and text.endswith("}")):
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, list):
+                parts = []
+                for item in parsed:
+                    if isinstance(item, dict):
+                        sku = item.get("sku") or item.get("product_id") or item.get("id")
+                        qty = item.get("qty") or item.get("quantity") or 1
+                        if sku:
+                            parts.append(f"{sku}:{qty}")
+                    elif isinstance(item, str):
+                        parts.append(item)
+                return ", ".join(parts)
+            elif isinstance(parsed, dict):
+                return ", ".join(f"{k}:{v}" for k, v in parsed.items())
+        except Exception:
+            pass
+    return text
+
+
 @router.post("/stages/{stage}/run-upload")
 async def run_upload_endpoint(
     stage: str,
-    file: UploadFile = File(...),
+    file: list[UploadFile] = File(default=[]),
+    files: list[UploadFile] = File(default=[]),
     unit_id: str | None = Form(None),
     unit_id_query: str | None = Query(None, alias="unit_id"),
+    order_id: str | None = Form(None),
+    order_id_query: str | None = Query(None, alias="order_id"),
     org_id: str | None = Form(None),
     org_id_query: str | None = Query(None, alias="org_id"),
     x_org_id: str | None = Header(None),
@@ -260,18 +291,12 @@ async def run_upload_endpoint(
     if stage not in valid_stages:
         raise HTTPException(404, f"Unknown stage: {stage}")
 
-    # Validate file format
-    ext = Path(file.filename or "").suffix.lower()
-    ct = (file.content_type or "").lower()
-    if ext not in ALLOWED_UPLOAD_EXTS and ct not in ALLOWED_MIME_TYPES:
-        raise HTTPException(422, f"Unsupported file type '{ext or ct}'. Allowed formats: jpg, jpeg, png, webp")
-    if ext and ext not in ALLOWED_UPLOAD_EXTS:
-        raise HTTPException(422, f"Unsupported file extension '{ext}'. Allowed formats: jpg, jpeg, png, webp")
-
-    # Read bytes and validate size (4.5 MB serverless limit)
-    raw_bytes = await file.read()
-    if len(raw_bytes) > MAX_UPLOAD_BYTES:
-        raise HTTPException(413, f"File too large ({len(raw_bytes)} bytes). Maximum allowed size is 4.5 MB")
+    # Gather all uploaded files (from single 'file' or multiple 'files' / 'file' inputs)
+    all_uploads = [f for f in (file + files) if f and f.filename]
+    if len(all_uploads) == 0:
+        raise HTTPException(422, "At least 1 photograph is required")
+    if len(all_uploads) > 5:
+        raise HTTPException(422, f"Maximum 5 photographs allowed (received {len(all_uploads)})")
 
     # Tenancy check: refuse cross-tenant requests
     if stage == "pack":
@@ -288,23 +313,45 @@ async def run_upload_endpoint(
                 if not sample_data.has(stage, target_unit, org):
                     raise HTTPException(404, f"Unit {target_unit} not found for organisation {org}")
 
-    # Content-addressed storage: sha256
-    sha256 = hashlib.sha256(raw_bytes).hexdigest()
-    if ext not in ALLOWED_UPLOAD_EXTS:
-        ext = ".png" if ct == "image/png" else (".webp" if ct == "image/webp" else ".jpg")
-    dest_filename = f"{sha256}{ext}"
-
     upload_dir = _resolve_upload_dir()
-    dest_path = upload_dir / dest_filename
-    dest_path.write_bytes(raw_bytes)
-    ref = f"uploads/{dest_filename}"
+    inputs = []
+    total_bytes = 0
+
+    for upload_f in all_uploads:
+        ext = Path(upload_f.filename or "").suffix.lower()
+        ct = (upload_f.content_type or "").lower()
+        if ext not in ALLOWED_UPLOAD_EXTS and ct not in ALLOWED_MIME_TYPES:
+            raise HTTPException(422, f"Unsupported file type '{ext or ct}'. Allowed formats: jpg, jpeg, png, webp")
+        if ext and ext not in ALLOWED_UPLOAD_EXTS:
+            raise HTTPException(422, f"Unsupported file extension '{ext}'. Allowed formats: jpg, jpeg, png, webp")
+
+        raw_bytes = await upload_f.read()
+        if len(raw_bytes) > MAX_FILE_BYTES:
+            raise HTTPException(413, f"File too large: '{upload_f.filename}' exceeds 4 MB limit ({len(raw_bytes)} bytes)")
+        total_bytes += len(raw_bytes)
+        if total_bytes > MAX_TOTAL_BYTES:
+            raise HTTPException(413, f"Total payload size ({total_bytes} bytes) exceeds 4.5 MB limit")
+
+        sha256 = hashlib.sha256(raw_bytes).hexdigest()
+        if ext not in ALLOWED_UPLOAD_EXTS:
+            ext = ".png" if ct == "image/png" else (".webp" if ct == "image/webp" else ".jpg")
+        dest_filename = f"{sha256}{ext}"
+        dest_path = upload_dir / dest_filename
+        dest_path.write_bytes(raw_bytes)
+        ref = f"uploads/{dest_filename}"
+        inputs.append({
+            "ref": ref,
+            "kind": "image",
+            "sha256": sha256,
+        })
 
     # Build agent input
-    effective_order_lines = (order_lines or order_lines_query or "").strip()
+    effective_order_lines = _normalize_order_lines(order_lines or order_lines_query)
+    target_order_id = (order_id or order_id_query or "").strip()
     effective_route = route or ("mfn" if stage == "pack" else sample_data.route(target_unit, org))
     agent_input = {
         "schema_version": "1.0",
-        "request_id": f"upload-{stage}-{target_unit}-{sha256[:8]}",
+        "request_id": f"upload-{stage}-{target_unit}-{inputs[0]['sha256'][:8]}",
         "workflow_id": f"WF-{org}-{target_unit}",
         "stage": stage,
         "subject": {
@@ -312,13 +359,7 @@ async def run_upload_endpoint(
             "subject_id": target_unit,
             "route": effective_route,
         },
-        "inputs": [
-            {
-                "ref": ref,
-                "kind": "image",
-                "sha256": sha256,
-            }
-        ],
+        "inputs": inputs,
         "previous_evidence": [],
         "context": {
             "overrides": [],
@@ -327,10 +368,12 @@ async def run_upload_endpoint(
                 "unit_id": target_unit,
                 "route": effective_route,
                 "ad_hoc_upload": True,
+                **({"order_id": target_order_id} if target_order_id else {}),
                 **({"order_lines": effective_order_lines} if effective_order_lines else {}),
             },
             "ad_hoc_upload": True,
             "run_type": "ad_hoc_upload",
+            **({"order_id": target_order_id} if target_order_id else {}),
             **({"order_lines": effective_order_lines} if effective_order_lines else {}),
         },
     }

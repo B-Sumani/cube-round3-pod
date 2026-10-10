@@ -400,12 +400,14 @@ def run_pack_pipeline(
     elif dev_row is not None:
         record_id = f"PCK-{clean_sub}"
         operator_id = "op_pack_system"
-        order_id = dev_row.get("order_id", f"ORD-{clean_sub}")
+        ctx_order_id = agent_input.get("context", {}).get("case", {}).get("order_id") or agent_input.get("context", {}).get("order_id")
+        order_id = ctx_order_id or dev_row.get("order_id", f"ORD-{clean_sub}")
         channel = dev_row.get("channel", "mfn")
     else:
         record_id = f"PCK-{clean_sub}"
         operator_id = "op_pack_system"
-        order_id = f"ORD-{clean_sub}"
+        ctx_order_id = agent_input.get("context", {}).get("case", {}).get("order_id") or agent_input.get("context", {}).get("order_id")
+        order_id = ctx_order_id or f"ORD-{clean_sub}"
         channel = "mfn"
 
     # 4. Resolve Order Lines and Candidate SKUs
@@ -696,6 +698,7 @@ def _build_response_record(
                 bboxes.append({"sku": it.sku, "bbox": it.bbox, "count": it.count})
 
     payload = {
+        "order_id": order_id,
         "channel": channel,
         "order_lines": order_lines,
         "source": source,

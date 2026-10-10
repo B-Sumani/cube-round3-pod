@@ -13,7 +13,7 @@ def test_missing_api_key_raises_provider_error(monkeypatch):
     adapter = GeminiVisionAdapter(api_key=None)
     with pytest.raises(ModelProviderError) as exc_info:
         adapter.analyze_box(b"fake_jpeg", candidate_skus=["SKU-A"])
-    assert "GEMINI_API_KEY is not configured" in str(exc_info.value)
+    assert "Vision key not configured on this server" in str(exc_info.value)
 
 
 def test_mock_adapter_is_injectable_for_tests():

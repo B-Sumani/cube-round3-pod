@@ -1,4 +1,5 @@
-# Architecture
+# Tessera Architecture
+> Five agents. One picture. Every decision traced.
 
 This document describes the **starter**. At the bottom is a section for **your Pod's architecture**, which you must fill in and which is part of the submission. A submission whose `ARCHITECTURE.md` still only describes the starter has not documented its system.
 

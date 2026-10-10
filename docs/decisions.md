@@ -269,3 +269,24 @@ _Add entries below._
        - If no vision API key is set, returns honest UNCERTAIN (`pending_output`) rather than failing silently or faking predictions.
        - UI displays the result with an explicit notice that images reside in ephemeral storage and will disappear on container restart.
 
+### D-125 · Tessera Rebrand, Multi-Angle Pack Inspection, and Shared Evidence Record Panel
+- Date / Owner: 2026-10-10 / Pod (UI + Pack + Orchestration)
+- Context:
+  1. The multi-agent operations platform is officially named **Tessera** with the tagline *"Five agents. One picture. Every decision traced."*. All user-facing UI surfaces (headers, logo, index.html title, hero section, footers, README.md, and ARCHITECTURE.md titles) reflect the Tessera brand identity, while maintaining strict stability of internal package names, directories, workflow IDs, API contracts, and CUBE Buildathon event references.
+  2. Warehouse packing inspection requires verifying carton contents and seal compliance from multiple vantage angles of the same box (e.g., top-down view, side label, corner seal). The earlier dual-action form was replaced with an integrated, single-flow Pack Manager workstation supporting 1 to 5 multi-angle photographs, client-side progressive compression (< 4 MB per file, <= 4.2 MB total for Vercel limits), a catalogue order line builder (with item quantities withheld from the vision model), and backend multi-image content-addressing.
+  3. Operational auditability requires a standardized, reusable forensic Evidence Record view across all stages, searches, and review workflows.
+- Options considered:
+  A) Retain split controls (standard check vs. ad-hoc single-image upload) and heterogeneous evidence presentation.
+  B) Overhaul Pack Manager into a single-flow inspection experience with multi-photo input, implement a unified shared `EvidenceRecordPanel` component, and enforce full mobile responsiveness.
+- Decision: B.
+- Why:
+  - Eliminates redundant controls: Pack is exclusively an MFN packing stage, so Route is fixed internally to `mfn` and Returned to `false`.
+  - Multi-angle inspection accurately models physical packing operations where single-camera views cannot capture both barcode labels and contents.
+  - Shared `EvidenceRecordPanel` guarantees uniform forensic depth, copy-friendly interaction (Record ID, SHA-256 hashes, content hash), and collapsible raw JSON across all views.
+  - Responsive hardening (viewport meta, mobile navigation drawer, stacked columns below 768px, horizontal overflow containers for tables, 44px tap targets, 16px mobile inputs, break-anywhere on hashes) ensures warehouse usability from handhelds (360px) to packing station monitors (1280px+).
+- Consequences:
+  - Pack Manager is now an intuitive, single-button inspection tool.
+  - All evidence displays are visually unified and cryptographically sealed.
+  - 100% backward compatibility preserved for existing sample workflows and automated test suites.
+
+

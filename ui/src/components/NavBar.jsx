@@ -35,7 +35,7 @@ export default function NavBar() {
   ]
 
   const linkClass = ({ isActive }) =>
-    `px-3 py-1.5 rounded-xl border-2 font-bold text-xs sm:text-sm flex items-center gap-1.5 transition-all focus:outline-none focus-visible:ring-2 ${
+    `px-3 py-2 sm:py-1.5 min-h-[44px] sm:min-h-0 rounded-xl border-2 font-bold text-sm sm:text-sm flex items-center gap-1.5 transition-all focus:outline-none focus-visible:ring-2 ${
       isActive
         ? 'bg-mustard text-ink border-ink shadow-[2px_2px_0_var(--ink)] -translate-y-0.5'
         : 'bg-card text-ink border-ink/30 hover:border-ink hover:bg-stone-50'
@@ -143,7 +143,7 @@ export default function NavBar() {
               value={operator}
               onChange={(e) => updateOperator(e.target.value)}
               placeholder="Operator"
-              className="font-mono font-bold text-xs text-ink bg-transparent border-none outline-none w-20 sm:w-28 focus:ring-0 p-0"
+              className="font-mono font-bold text-base sm:text-xs text-ink bg-transparent border-none outline-none w-20 sm:w-28 focus:ring-0 p-0"
             />
           </div>
 
@@ -152,10 +152,10 @@ export default function NavBar() {
             <button
               type="button"
               onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
-              className="p-1.5 border-2 border-ink rounded-xl bg-card text-ink shadow-[1px_1px_0_var(--ink)] focus:outline-none focus-visible:ring-2"
+              className="p-2 min-w-[44px] min-h-[44px] flex items-center justify-center border-2 border-ink rounded-xl bg-card text-ink shadow-[1px_1px_0_var(--ink)] focus:outline-none focus-visible:ring-2"
               aria-label={mobileMenuOpen ? 'Close navigation menu' : 'Open navigation menu'}
             >
-              {mobileMenuOpen ? <X size={18} /> : <Menu size={18} />}
+              {mobileMenuOpen ? <X size={20} /> : <Menu size={20} />}
             </button>
           </div>
         </div>

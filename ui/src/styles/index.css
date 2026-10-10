@@ -15,6 +15,22 @@
     font-family: 'Young Serif', 'DM Serif Display', Georgia, serif;
     color: var(--ink);
   }
+
+  /* Responsive: 16px inputs on mobile prevent auto-zoom in mobile Safari / Chrome */
+  input, select, textarea {
+    font-size: 16px;
+  }
+  @media (min-width: 768px) {
+    input, select, textarea {
+      font-size: inherit;
+    }
+  }
+
+  /* IDs and hashes overflow protection */
+  .break-anywhere {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
 }
 
 @layer components {
