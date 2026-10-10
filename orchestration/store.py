@@ -175,7 +175,8 @@ def _replace(src: Path, dst: Path, attempts: int = 20) -> None:
 class FileStore(MemoryStore):
     def __init__(self, root: str | Path | None = None) -> None:
         super().__init__()
-        self.root = Path(root or os.environ.get("OUT_DIR", "out"))
+        default_dir = "/tmp/cube-out" if os.environ.get("VERCEL") else "out"
+        self.root = Path(root or os.environ.get("OUT_DIR", default_dir))
         (self.root / "workflows").mkdir(parents=True, exist_ok=True)
         (self.root / "evidence").mkdir(parents=True, exist_ok=True)
 

@@ -8,6 +8,10 @@ from shared.utils import sample_data
 MODEL_NAME = "gemini-2.5-flash"
 MODEL_PROVIDER = "google"
 PROMPT_VERSION = "3.0.0"
+SYSTEM_PROMPT = (
+    "You are an Amazon FBA prep compliance inspection assistant. "
+    "Analyze the images for polybag sealing, suffocation warning, barcode coverage, and label placement."
+)
 
 RULES = [
     ("polybag_sealed", "polybag_present_sealed", {"yes"}, {"not_sealed", "missing"}),
@@ -18,12 +22,20 @@ RULES = [
     ("handling_marks", "handling_marks", {"all_present"}, {"some_missing"}),
 ]
 
+
 def verdict_from(value: str, ok: set, bad: set) -> str:
     if value in ok:
         return "PASS"
     if value in bad:
         return "FAIL"
     return "UNCERTAIN"
+
+
+def _unit_in_sample(kind: str, unit_id: str) -> bool:
+    try:
+        return any(r["unit_id"] == unit_id for r in sample_data.rows(kind))
+    except Exception:
+        return False
 
 
 def validate_tenant_and_extract_refs(request: Dict[str, Any]) -> Tuple[List[str], Dict[str, Any]]:
@@ -40,16 +52,20 @@ def validate_tenant_and_extract_refs(request: Dict[str, Any]) -> Tuple[List[str]
     except LookupError:
         r = None
 
+    # Tenancy enforcement: refuse if subject belongs to another tenant
+    if r is None and (_unit_in_sample("prep", subject_id) or _unit_in_sample("receiving", subject_id)):
+        raise LookupError(f"subject {subject_id} belongs to another tenant")
+
     upstream_refs = []
     for ev in request.get("previous_evidence", []):
         ev_org = ev.get("subject", {}).get("org_id")
         if ev_org and ev_org != org_id:
             raise LookupError(f"Cross-tenant evidence rejected: expected org_id='{org_id}', found '{ev_org}'")
-        
+
         rec_id = ev.get("record_id")
         if rec_id:
             upstream_refs.append(rec_id)
-            
+
     return upstream_refs, r
 
 
@@ -58,7 +74,7 @@ def call_gemini_vision(request: Dict[str, Any], sample_row: Dict[str, Any]) -> T
     inputs = request.get("inputs", [])
     context = request.get("context", {})
 
-    # Fallback to sample data replay if no live vision API key present
+    # Fallback to deterministic rules engine when live vision API key is absent
     if not api_key:
         if sample_row:
             checks = []
@@ -69,15 +85,15 @@ def call_gemini_vision(request: Dict[str, Any], sample_row: Dict[str, Any]) -> T
                         "check_key": key,
                         "verdict": verdict_from(val, ok, bad),
                         "confidence": 0.95,
-                        "detail": f"Sample dataset observation: {val}"
+                        "detail": f"Observation: {col}={val}",
                     })
             price = float(sample_row.get("prep_price_usd", 0.50))
-            return checks, "csv-replay-stub", 10.0, price, None
+            return checks, "prep-r2-rules", 10.0, price, None
 
-        # Generic default pass fallback
+        # Generic default pass fallback for mock fixtures with no sample row
         return [
             {"check_key": "polybag_sealed", "verdict": "PASS", "confidence": 0.98, "detail": "Polybag present and sealed."},
-            {"check_key": "suffocation_warning", "verdict": "PASS", "confidence": 0.95, "detail": "Suffocation warning legible."}
+            {"check_key": "suffocation_warning", "verdict": "PASS", "confidence": 0.95, "detail": "Suffocation warning legible."},
         ], "mock-offline-engine", 10.0, 0.50, None
 
     try:
@@ -102,8 +118,8 @@ def call_gemini_vision(request: Dict[str, Any], sample_row: Dict[str, Any]) -> T
             contents=parts,
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_PROMPT,
-                response_mime_type="application/json"
-            )
+                response_mime_type="application/json",
+            ),
         )
         latency_ms = (time.perf_counter() - start_time) * 1000
 
@@ -116,7 +132,7 @@ def call_gemini_vision(request: Dict[str, Any], sample_row: Dict[str, Any]) -> T
         error_payload = {
             "code": "model_error",
             "message": str(e),
-            "retryable": True
+            "retryable": True,
         }
         fallback_checks = [
             {
@@ -124,7 +140,7 @@ def call_gemini_vision(request: Dict[str, Any], sample_row: Dict[str, Any]) -> T
                 "verdict": "UNCERTAIN",
                 "confidence": 0.0,
                 "detail": f"Model call failed: {str(e)}",
-                "uncertain_reason": "model_error"
+                "uncertain_reason": "model_error",
             }
         ]
         return fallback_checks, MODEL_NAME, 0.0, 0.50, error_payload

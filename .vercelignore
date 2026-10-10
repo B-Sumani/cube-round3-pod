@@ -1,0 +1,31 @@
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Virtual environments
+.venv/
+env/
+venv/
+
+# Dependencies
+node_modules/
+ui/node_modules/
+
+# Local run artifacts & logs
+out/
+*.log
+
+# Test suites & test fixtures (excludes from production bundle)
+tests/
+
+# Git and IDE metadata
+.git/
+.github/
+.vscode/
+
+# Environment files
+.env
+.env.*
+!.env.example
