@@ -4,7 +4,7 @@
     "app": {
       "root": ".",
       "framework": "fastapi",
-      "entrypoint": "orchestration/api.py:app"
+      "entrypoint": "main.py"
     },
     "ui": {
       "root": "ui",
@@ -12,17 +12,7 @@
     }
   },
   "rewrites": [
-    {
-      "source": "/api/(.*)",
-      "destination": {
-        "service": "app"
-      }
-    },
-    {
-      "source": "/(.*)",
-      "destination": {
-        "service": "ui"
-      }
-    }
+    { "source": "/api/(.*)", "destination": { "service": "app" } },
+    { "source": "/(.*)",     "destination": { "service": "ui" } }
   ]
 }
